@@ -7,8 +7,7 @@ import {
   useState,
 } from 'react'
 import { loadPdfFromBase64, renderPageToCanvas } from '../../utils/pdfUtils'
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+import { apiUrl } from '../../utils/apiUrl'
 
 const DocumentViewer = forwardRef(function DocumentViewer(_props, ref) {
   const [context, setContext] = useState(null)
@@ -35,7 +34,7 @@ const DocumentViewer = forwardRef(function DocumentViewer(_props, ref) {
     const load = async () => {
       try {
         setLoading(true)
-        const response = await fetch(`${API_URL}/api/context`)
+        const response = await fetch(apiUrl('/api/context'))
         const data = await response.json()
         if (mounted) {
           setContext(data)

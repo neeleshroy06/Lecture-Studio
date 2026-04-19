@@ -1,107 +1,114 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import { classify, loadFromStorage } from '../utils/gestureModel'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import * as tf from '@tensorflow/tfjs'
+import { resolveRuntimeCalibration } from '../lib/asl/aslCalibrationStorage'
+import { classifyNormalizedLandmarks, getBuiltinTemplateRecord } from '../lib/asl/classifyLetter'
+import { getHandSpan, mirrorLandmarksX, normalizeLandmarks } from '../lib/asl/landmarks'
+import { useMediaPipeHandLandmarks } from './useMediaPipeHandLandmarks'
 
-export default function useASLClassifier({ onLetter } = {}) {
-  const handsRef = useRef(null)
-  const cameraRef = useRef(null)
-  const streamRef = useRef(null)
-  const [currentLetter, setCurrentLetter] = useState('')
-  const [landmarks, setLandmarks] = useState(null)
-  const lastLetterRef = useRef('')
-  const lastLetterTimeRef = useRef(0)
+const MIN_HAND_SPAN = 0.18
+const RECOGNITION_UI_THROTTLE_MS = 50
+
+function emptyRecognition(source = 'builtin') {
+  return {
+    hasHand: false,
+    currentLetter: '',
+    landmarks: null,
+    normalized: null,
+    handedness: '',
+    classification: null,
+    templateSource: source,
+    usingPersonalizedTemplates: false,
+    updatedAt: 0,
+  }
+}
+
+/**
+ * Fingerspelling classifier on top of {@link useMediaPipeHandLandmarks}.
+ * Templates: built-in + optional `public/asl/*.json` (see resolveRuntimeCalibration).
+ */
+export default function useASLClassifier({ active, videoRef, canvasRef }) {
+  const templatesRef = useRef({
+    templates: getBuiltinTemplateRecord(),
+    source: 'builtin',
+    personalized: false,
+  })
+  const lastUiRef = useRef(0)
+  const [recognition, setRecognition] = useState(() => emptyRecognition())
 
   useEffect(() => {
-    loadFromStorage()
-  }, [])
-
-  const stopASL = useCallback(() => {
-    cameraRef.current?.stop()
-    streamRef.current?.getTracks().forEach((track) => track.stop())
-    cameraRef.current = null
-    streamRef.current = null
-    handsRef.current = null
-    setCurrentLetter('')
-    setLandmarks(null)
-  }, [])
-
-  const startASL = useCallback(
-    async (videoElement, canvasElement) => {
-      if (!window.Hands || !window.Camera) {
-        throw new Error('MediaPipe Hands is not available.')
+    let cancelled = false
+    ;(async () => {
+      await tf.ready()
+      const bundle = await resolveRuntimeCalibration()
+      if (cancelled) return
+      templatesRef.current = {
+        templates: bundle.templates,
+        source: bundle.source,
+        personalized: bundle.personalized,
       }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
-      const hands = new window.Hands({
-        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-      })
+  const onDetection = useCallback(({ landmarks, handedness }) => {
+    const now = Date.now()
+    if (now - lastUiRef.current < RECOGNITION_UI_THROTTLE_MS) return
+    lastUiRef.current = now
 
-      hands.setOptions({
-        maxNumHands: 1,
-        modelComplexity: 1,
-        minDetectionConfidence: 0.7,
-        minTrackingConfidence: 0.5,
-      })
+    const bundle = templatesRef.current
+    const templateSource = bundle.source || 'builtin'
+    const templateRecord = bundle.templates
 
-      hands.onResults((results) => {
-        const context = canvasElement?.getContext('2d')
-        if (canvasElement && context) {
-          canvasElement.width = videoElement.videoWidth || canvasElement.clientWidth || 640
-          canvasElement.height = videoElement.videoHeight || canvasElement.clientHeight || 480
-          context.clearRect(0, 0, canvasElement.width, canvasElement.height)
+    if (!landmarks || !templateRecord) {
+      setRecognition(emptyRecognition(templateSource))
+      return
+    }
 
-          if (results.multiHandLandmarks?.length) {
-            window.drawConnectors(context, results.multiHandLandmarks[0], window.HAND_CONNECTIONS, {
-              color: '#6C63FF',
-              lineWidth: 3,
-            })
-            window.drawLandmarks(context, results.multiHandLandmarks[0], {
-              color: '#00D4AA',
-              lineWidth: 2,
-              radius: 3,
-            })
-          }
-        }
+    const canonicalLandmarks = handedness?.toLowerCase() === 'left' ? mirrorLandmarksX(landmarks) : landmarks
+    const handSpan = getHandSpan(canonicalLandmarks)
+    const normalized = handSpan >= MIN_HAND_SPAN ? normalizeLandmarks(canonicalLandmarks) : null
+    const classification = normalized ? classifyNormalizedLandmarks(normalized, templateRecord) : null
+    const displayLetter = classification?.passesDisplayThresholds ? classification.letter : ''
 
-        const nextLandmarks = results.multiHandLandmarks?.[0] || null
-        setLandmarks(nextLandmarks)
+    setRecognition({
+      hasHand: Boolean(normalized),
+      currentLetter: displayLetter,
+      landmarks: canonicalLandmarks,
+      normalized,
+      handedness: handedness || '',
+      classification,
+      templateSource,
+      usingPersonalizedTemplates: Boolean(classification?.isPersonalized),
+      updatedAt: Date.now(),
+    })
+  }, [])
 
-        if (!nextLandmarks) {
-          setCurrentLetter('')
-          lastLetterRef.current = ''
-          return
-        }
+  const hand = useMediaPipeHandLandmarks({
+    active,
+    videoRef,
+    canvasRef,
+    onDetection,
+  })
 
-        const letter = classify(nextLandmarks)
-        setCurrentLetter(letter || '')
+  useEffect(() => {
+    if (!active) {
+      setRecognition(emptyRecognition(templatesRef.current.source || 'builtin'))
+    }
+  }, [active])
 
-        const now = Date.now()
-        if (letter && letter === lastLetterRef.current && now - lastLetterTimeRef.current >= 600) {
-          onLetter?.(letter)
-          lastLetterTimeRef.current = Date.now() + 800
-        } else if (letter !== lastLetterRef.current) {
-          lastLetterRef.current = letter
-          lastLetterTimeRef.current = now
-        }
-      })
-
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
-      streamRef.current = stream
-      videoElement.srcObject = stream
-      await videoElement.play()
-
-      const camera = new window.Camera(videoElement, {
-        onFrame: async () => {
-          await hands.send({ image: videoElement })
-        },
-        width: 640,
-        height: 480,
-      })
-
-      handsRef.current = hands
-      cameraRef.current = camera
-      camera.start()
-    },
-    [onLetter],
+  return useMemo(
+    () => ({
+      ...recognition,
+      cameraPermission: hand.permission,
+      cameraError: hand.error,
+      isCameraRunning: hand.isRunning,
+      landmarkCount: hand.landmarkCount,
+      rawHandedness: hand.handedness,
+      stopASL: hand.stop,
+      startASL: async () => {},
+    }),
+    [hand.error, hand.handedness, hand.isRunning, hand.landmarkCount, hand.permission, hand.stop, recognition],
   )
-
-  return { startASL, stopASL, currentLetter, landmarks }
 }

@@ -210,3 +210,9 @@ textarea {
   background-size: 400px 100%;
   animation: shimmer 1.5s linear infinite;
 }
+
+.transcript-highlight {
+  background: rgba(255, 220, 90, 0.42);
+  border-radius: 2px;
+  box-decoration-break: clone;
+}

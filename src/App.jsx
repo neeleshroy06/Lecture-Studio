@@ -10,11 +10,7 @@ export default function App() {
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       <NavBar activeTab={activeTab} onTabChange={setActiveTab} />
       <div style={{ flex: 1, overflow: 'hidden' }}>
-        {activeTab === 'professor' ? (
-          <ProfessorPage onLaunch={() => setActiveTab('student')} />
-        ) : (
-          <StudentPage />
-        )}
+        {activeTab === 'professor' ? <ProfessorPage /> : <StudentPage />}
       </div>
     </div>
   )

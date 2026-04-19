@@ -3,6 +3,7 @@ import { float32ToBase64PCM } from '../utils/audioUtils'
 
 export function useAudioRecorder() {
   const mediaRecorderRef = useRef(null)
+  const recordedMimeRef = useRef('')
   const streamRef = useRef(null)
   const chunksRef = useRef([])
   const timerRef = useRef(null)
@@ -26,7 +27,12 @@ export function useAudioRecorder() {
 
   const start = async () => {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-    const recorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' })
+    const mimeCandidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4']
+    const mimeType = mimeCandidates.find((t) => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(t))
+    recordedMimeRef.current = mimeType || ''
+    const recorder = mimeType
+      ? new MediaRecorder(stream, { mimeType })
+      : new MediaRecorder(stream)
     streamRef.current = stream
     mediaRecorderRef.current = recorder
     chunksRef.current = []
@@ -68,7 +74,8 @@ export function useAudioRecorder() {
         clearTimer()
         setIsRecording(false)
         setIsPaused(false)
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' })
+        const blobType = recordedMimeRef.current || recorder.mimeType || 'audio/webm'
+        const blob = new Blob(chunksRef.current, { type: blobType })
         streamRef.current?.getTracks().forEach((track) => track.stop())
         streamRef.current = null
         resolve(blob)

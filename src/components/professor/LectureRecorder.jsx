@@ -97,12 +97,18 @@ export default function LectureRecorder({ onTranscriptReady }) {
 
   const processBlob = async (blob) => {
     if (!blob) return
+    if (blob.size < 256) {
+      setError('No usable audio was captured. Check the mic permission, try another browser, or record for a few seconds.')
+      setViewState('idle')
+      return
+    }
     setError('')
     setViewState('processing')
 
     try {
       const formData = new FormData()
-      formData.append('audio', blob, 'lecture.webm')
+      const ext = blob.type?.includes('mp4') ? 'm4a' : 'webm'
+      formData.append('audio', blob, `lecture.${ext}`)
       const response = await axios.post('/api/transcribe', formData)
       const nextTranscript = response.data?.transcript || ''
       setTranscript(nextTranscript)

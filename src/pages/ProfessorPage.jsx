@@ -1,44 +1,50 @@
-import { useState } from 'react'
+import { useEffect, useRef } from 'react'
+import axios from 'axios'
 import LectureRecorder from '../components/professor/LectureRecorder'
-import ScreenSharePanel from '../components/professor/ScreenSharePanel'
-import UploadPanel from '../components/professor/UploadPanel'
-import VoiceCloningPanel from '../components/professor/VoiceCloningPanel'
-import SessionLauncher from '../components/professor/SessionLauncher'
+import CourseDocumentPanel from '../components/professor/CourseDocumentPanel'
 
-export default function ProfessorPage({ onLaunch }) {
-  const [transcript, setTranscript] = useState('')
-  const [handwrittenNotesText, setHandwrittenNotesText] = useState('')
-  const [typedNotes, setTypedNotes] = useState('')
-  const [pdfBase64, setPdfBase64] = useState(null)
-  const [pdfMimeType, setPdfMimeType] = useState('application/pdf')
-  const [voiceId, setVoiceId] = useState('')
+export default function ProfessorPage() {
+  const lastSyncedTranscriptRef = useRef('')
+
+  // Auto-sync the lecture transcript to the server whenever it's ready, so the
+  // student session has it available without an extra "launch" step.
+  const handleTranscriptReady = async (transcript) => {
+    if (!transcript || transcript === lastSyncedTranscriptRef.current) return
+    lastSyncedTranscriptRef.current = transcript
+    try {
+      await axios.post('/api/set-context', { transcript })
+    } catch {
+      // non-fatal; UI will still show the transcript locally
+    }
+  }
+
+  useEffect(() => {
+    lastSyncedTranscriptRef.current = ''
+  }, [])
 
   return (
-    <div className="animate-fade-in" style={{ height: '100%', display: 'flex', overflow: 'hidden', padding: 12, gap: 12 }}>
-      <div className="muted-scrollbar" style={{ width: '55%', overflowY: 'auto', padding: 12, display: 'grid', gap: 20 }}>
-        <LectureRecorder onTranscriptReady={setTranscript} />
-        <ScreenSharePanel />
+    <div
+      className="animate-fade-in"
+      style={{
+        height: '100%',
+        display: 'flex',
+        overflow: 'hidden',
+        padding: 16,
+        gap: 16,
+      }}
+    >
+      <div
+        className="muted-scrollbar"
+        style={{ flex: 1, overflowY: 'auto', paddingRight: 4, display: 'grid', gap: 16, alignContent: 'start' }}
+      >
+        <LectureRecorder onTranscriptReady={handleTranscriptReady} />
       </div>
 
-      <div className="muted-scrollbar" style={{ width: '45%', overflowY: 'auto', padding: 12, display: 'grid', gap: 20 }}>
-        <UploadPanel
-          onPdfReady={(base64, mimeType) => {
-            setPdfBase64(base64)
-            setPdfMimeType(mimeType)
-          }}
-          onHandwritingOCR={setHandwrittenNotesText}
-          onTypedNotes={setTypedNotes}
-        />
-        <VoiceCloningPanel onVoiceCloned={setVoiceId} />
-        <SessionLauncher
-          transcript={transcript}
-          pdfBase64={pdfBase64}
-          pdfMimeType={pdfMimeType}
-          voiceId={voiceId}
-          handwrittenNotesText={handwrittenNotesText}
-          typedNotes={typedNotes}
-          onLaunch={onLaunch}
-        />
+      <div
+        className="muted-scrollbar"
+        style={{ flex: 1, overflowY: 'auto', paddingRight: 4, display: 'grid', gap: 16, alignContent: 'start' }}
+      >
+        <CourseDocumentPanel />
       </div>
     </div>
   )

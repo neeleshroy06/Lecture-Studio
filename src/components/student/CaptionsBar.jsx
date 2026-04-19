@@ -1,4 +1,4 @@
-export default function CaptionsBar({ caption }) {
+export default function CaptionsBar({ caption, speaker = '' }) {
   return (
     <div
       style={{
@@ -17,6 +17,11 @@ export default function CaptionsBar({ caption }) {
       <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--secondary)', marginBottom: 4 }}>
         Live Captions ♿
       </div>
+      {speaker && (
+        <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>
+          {speaker}
+        </div>
+      )}
       <div aria-live="polite" style={{ textAlign: 'center', color: caption ? 'white' : 'var(--text-muted)', fontSize: caption ? 14 : 12 }}>
         {caption || 'Captions will appear here when the professor speaks'}
       </div>

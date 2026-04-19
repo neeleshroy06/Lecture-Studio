@@ -25,6 +25,20 @@ export default function VoiceControls({
     )
   }
 
+  if (sessionState === 'connecting') {
+    return (
+      <button
+        type="button"
+        aria-label="Connecting to live session"
+        className="btn-primary"
+        style={{ width: 200, height: 52, opacity: 0.8, cursor: 'wait' }}
+        disabled
+      >
+        Connecting...
+      </button>
+    )
+  }
+
   if (sessionState !== 'active') return null
 
   return (
