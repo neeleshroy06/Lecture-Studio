@@ -1,7 +1,7 @@
 export default function InputModeToggle({ mode, onToggle }) {
   const options = [
-    { id: 'voice', label: '🎤 Voice' },
-    { id: 'asl', label: '🤟 ASL' },
+    { id: 'voice', label: 'Voice' },
+    { id: 'asl', label: 'ASL' },
   ]
 
   return (

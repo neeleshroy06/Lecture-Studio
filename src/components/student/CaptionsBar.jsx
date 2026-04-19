@@ -15,7 +15,7 @@ export default function CaptionsBar({ caption, speaker = '' }) {
       }}
     >
       <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.14em', color: 'var(--secondary)', marginBottom: 4 }}>
-        Live Captions ♿
+        Live captions
       </div>
       {speaker && (
         <div style={{ fontSize: 11, color: 'var(--text-secondary)', marginBottom: 4 }}>

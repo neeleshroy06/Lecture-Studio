@@ -170,7 +170,7 @@ const DocumentViewer = forwardRef(function DocumentViewer(_props, ref) {
     return (
       <div className="glass-card" style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}>
         <div>
-          <div style={{ fontSize: 42, opacity: 0.7 }}>📄</div>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.14em', color: 'var(--text-muted)', opacity: 0.85 }}>PDF</div>
           <p style={{ color: 'var(--text-muted)' }}>Waiting for professor to upload course materials...</p>
         </div>
       </div>

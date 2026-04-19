@@ -9,6 +9,7 @@ import path from 'path'
 import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { WebSocketServer, WebSocket } from 'ws'
+import { computeStrokeMetadata, shouldMergeAnnotationStrokes } from '../src/utils/annotationMetadata.js'
 
 const DEBUG = process.env.DEBUG === 'true'
 const log = (...args) => DEBUG && console.log(...args)
@@ -24,6 +25,7 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
 const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '')
 const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma3:4b'
+const DEFAULT_GEMINI_LIVE_MODEL = process.env.GEMINI_LIVE_MODEL || 'models/gemini-3.1-flash-live-preview'
 /** Default HTTP timeout for Ollama /api/chat (chapter detection, short calls). */
 const OLLAMA_TIMEOUT_MS = Math.max(10000, Number(process.env.OLLAMA_TIMEOUT_MS) || 120000)
 /**
@@ -509,18 +511,21 @@ function groupAnnotationEvents(annotationEvents = []) {
       startedAtMs: Math.max(0, Math.round(normalizeNumberish(event.startedAtMs, 0))),
       endedAtMs: Math.max(0, Math.round(normalizeNumberish(event.endedAtMs, event.startedAtMs))),
       nearbyText: Array.isArray(event.nearbyText) ? event.nearbyText.filter(Boolean) : [],
-      bounds: normalizeBounds(event.bounds),
+      ...computeStrokeMetadata({
+        ...event,
+        bounds: normalizeBounds(event.bounds),
+      }),
       annotationLabel: String(event.annotationLabel || '').trim(),
     }))
     .sort((left, right) => left.startedAtMs - right.startedAtMs)
 
   const groups = []
-  const gapMs = 7000
   for (const stroke of normalized) {
     const previous = groups[groups.length - 1]
-    if (previous && previous.page === stroke.page && stroke.startedAtMs - previous.endedAtMs <= gapMs) {
+    if (previous && shouldMergeAnnotationStrokes(previous.lastStroke, stroke)) {
       previous.events.push(stroke)
       previous.endedAtMs = Math.max(previous.endedAtMs, stroke.endedAtMs)
+      previous.lastStroke = stroke
       continue
     }
     groups.push({
@@ -528,12 +533,15 @@ function groupAnnotationEvents(annotationEvents = []) {
       startedAtMs: stroke.startedAtMs,
       endedAtMs: stroke.endedAtMs,
       events: [stroke],
+      lastStroke: stroke,
     })
   }
 
   return groups.map((group, index) => {
     const bounds = mergeBounds(group.events.map((event) => event.bounds))
     const nearbyText = [...new Set(group.events.flatMap((event) => event.nearbyText || []))].slice(0, 8)
+    const regionLabels = [...new Set(group.events.map((event) => event.regionLabel).filter(Boolean))]
+    const shapeHints = [...new Set(group.events.map((event) => event.shapeHint).filter(Boolean))]
     const actionSummary = group.events
       .map((event) => event.annotationLabel || formatAnnotationAction(event))
       .filter(Boolean)
@@ -549,6 +557,9 @@ function groupAnnotationEvents(annotationEvents = []) {
       annotation: actionSummary || 'Professor annotated this page region.',
       eventCount: group.events.length,
       tools: [...new Set(group.events.map((event) => event.tool))],
+      sourceAnnotationIds: group.events.map((event) => event.id).filter(Boolean),
+      regionLabels,
+      shapeHints,
     }
   })
 }
@@ -558,9 +569,15 @@ function overlapDuration(startA, endA, startB, endB) {
 }
 
 function attachTranscriptToMoments(moments = [], transcriptSegments = []) {
-  return moments.map((moment) => {
-    const windowStart = Math.max(0, moment.startedAtMs - 7000)
-    const windowEnd = moment.endedAtMs + 7000
+  return moments.map((moment, index) => {
+    const previousMoment = moments[index - 1]
+    const nextMoment = moments[index + 1]
+    const leftGap = previousMoment ? Math.max(0, moment.startedAtMs - previousMoment.endedAtMs) : Number.POSITIVE_INFINITY
+    const rightGap = nextMoment ? Math.max(0, nextMoment.startedAtMs - moment.endedAtMs) : Number.POSITIVE_INFINITY
+    const leftPad = Number.isFinite(leftGap) ? Math.max(700, Math.min(2500, Math.round(leftGap / 2))) : 2500
+    const rightPad = Number.isFinite(rightGap) ? Math.max(700, Math.min(2500, Math.round(rightGap / 2))) : 2500
+    const windowStart = Math.max(0, moment.startedAtMs - leftPad)
+    const windowEnd = moment.endedAtMs + rightPad
     const overlapping = transcriptSegments.filter((segment) => {
       const segmentStart = normalizeNumberish(segment.startMs, 0)
       const segmentEnd = normalizeNumberish(segment.endMs, segmentStart)
@@ -585,6 +602,9 @@ async function generateLectureMemoryWithGemma(moments = [], transcript = '') {
     annotation: clipText(moment.annotation, OLLAMA_ANNOTATION_CHARS),
     nearbyText: Array.isArray(moment.nearbyText) ? moment.nearbyText.filter(Boolean).slice(0, OLLAMA_NEARBY_TEXT_ITEMS) : [],
     transcript: clipText(moment.transcript, OLLAMA_MOMENT_TRANSCRIPT_CHARS),
+    sourceAnnotationIds: Array.isArray(moment.sourceAnnotationIds) ? moment.sourceAnnotationIds : [],
+    regionLabels: Array.isArray(moment.regionLabels) ? moment.regionLabels : [],
+    shapeHints: Array.isArray(moment.shapeHints) ? moment.shapeHints : [],
   }))
 
   const prompt = `You are converting a lecture transcript plus timestamped document annotations into structured lecture memory.
@@ -629,6 +649,9 @@ ${JSON.stringify(
             annotation: String(entry.annotation || moments[index]?.annotation || '').trim(),
             page: Number(entry.page) || moments[index]?.page || 1,
             summary: String(entry.summary || '').trim(),
+            sourceAnnotationIds: Array.isArray(moments[index]?.sourceAnnotationIds) ? moments[index].sourceAnnotationIds : [],
+            regionLabels: Array.isArray(moments[index]?.regionLabels) ? moments[index].regionLabels : [],
+            shapeHints: Array.isArray(moments[index]?.shapeHints) ? moments[index].shapeHints : [],
           })),
           mode: 'ready',
           warning: '',
@@ -736,6 +759,12 @@ function decodeReason(reason) {
   return String(reason)
 }
 
+function normalizeGeminiLiveModel(model) {
+  const raw = String(model || '').trim()
+  if (!raw) return DEFAULT_GEMINI_LIVE_MODEL
+  return raw.startsWith('models/') ? raw : `models/${raw}`
+}
+
 function compactSection(title, value, fallback = '(none)', maxChars = 12000) {
   const text = typeof value === 'string' ? value.trim() : ''
   const body = text ? text.slice(0, maxChars) : fallback
@@ -747,9 +776,9 @@ function buildContextSystemInstruction() {
     ? sessionContext.chapters.map((chapter, index) => `${index + 1}. ${chapter}`).join('\n')
     : '(none)'
 
-  return `You are Ed-Assist, a live course assistant helping a student understand the uploaded course materials.
+  return `You are the professor of this course speaking live with a student about the uploaded course materials.
 
-Use only the available transcript, notes, seeded document context, and current conversation for factual answers. If information is missing, say so briefly.
+Speak in first person as the professor. Use only the available transcript, notes, seeded document context, and current conversation for factual answers. If information is missing, say so briefly.
 
 ${compactSection('Detected chapters', chapters, '(none)', 3000)}
 
@@ -1395,9 +1424,14 @@ liveWss.on('connection', (browserWs) => {
   let currentSource = null
   let sessionSystemInstruction = ''
   let pendingSeedTurns = []
+  let requestedGeminiModel = DEFAULT_GEMINI_LIVE_MODEL
 
   function buildSystemInstruction() {
     return sessionSystemInstruction.trim() || buildContextSystemInstruction()
+  }
+
+  function canUseTextToSpeech() {
+    return Boolean(sessionContext.voiceId && ELEVENLABS_API_KEY?.trim())
   }
 
   function prepareElevenLabs() {
@@ -1411,19 +1445,12 @@ liveWss.on('connection', (browserWs) => {
     isSpeaking = false
     currentSource = null
 
-    if (!ELEVENLABS_API_KEY?.trim()) {
-      safeSend(browserWs, {
-        type: 'error',
-        message: 'Server has no ELEVENLABS_API_KEY. Add it to .env and restart the proxy.',
-      })
+    if (!canUseTextToSpeech()) {
+      log('[ElevenLabs] TTS unavailable for this session — continuing with text-only replies')
       return
     }
 
     const voiceId = sessionContext.voiceId
-    if (!voiceId) {
-      console.warn('[ElevenLabs] No voice ID set — skipping TTS connection')
-      return
-    }
 
     const wsUrl =
       `wss://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream-input` +
@@ -1482,13 +1509,16 @@ liveWss.on('connection', (browserWs) => {
         }
 
         if (msg.isFinal) {
-          isSpeaking = false
-          currentSource = null
-          safeSend(browserWs, { type: 'speaking_end' })
-          prepareElevenLabs()
+          stopElevenLabs()
+          return
         }
 
         if (msg.error) {
+          if (String(msg.error).includes('input_timeout_exceeded')) {
+            log('[ElevenLabs] Idle timeout reached; reconnecting on next response')
+            stopElevenLabs()
+            return
+          }
           console.error('[ElevenLabs] API error:', msg.error)
           safeSend(browserWs, { type: 'error', message: `ElevenLabs: ${msg.error}` })
         }
@@ -1513,14 +1543,25 @@ liveWss.on('connection', (browserWs) => {
     })
   }
 
+  function ensureElevenLabsConnection() {
+    if (!canUseTextToSpeech()) return false
+    if (elevenWs && (elevenWs.readyState === WebSocket.OPEN || elevenWs.readyState === WebSocket.CONNECTING)) {
+      return true
+    }
+    prepareElevenLabs()
+    return false
+  }
+
   function streamTextToElevenLabs(text) {
     if (!text || text.trim() === '') return
+    if (!canUseTextToSpeech()) return
 
     currentSource = currentSource || 'gemini'
 
     if (!elevenReady || !elevenWs || elevenWs.readyState !== WebSocket.OPEN) {
       log(`[ElevenLabs] Not ready yet — queuing: "${text.substring(0, 30)}..."`)
       elevenQueue.push(text)
+      ensureElevenLabsConnection()
       return
     }
 
@@ -1582,9 +1623,15 @@ liveWss.on('connection', (browserWs) => {
 
     const setup = {
       setup: {
-        model: 'models/gemini-3.1-flash-live-preview',
+        model: requestedGeminiModel,
         generationConfig: {
           responseModalities: ['AUDIO'],
+          // Disable thinking entirely so the model never speaks its internal
+          // reasoning out loud (which then leaks into outputAudioTranscription).
+          thinkingConfig: {
+            thinkingBudget: 0,
+            includeThoughts: false,
+          },
         },
         systemInstruction: {
           parts: [{ text: buildSystemInstruction() }],
@@ -1600,7 +1647,6 @@ liveWss.on('connection', (browserWs) => {
     geminiWs.on('open', () => {
       log('[Gemini] WebSocket opened')
       geminiWs.send(JSON.stringify(setup))
-      prepareElevenLabs()
       safeSend(browserWs, { type: 'gemini_connected' })
     })
 
@@ -1623,11 +1669,6 @@ liveWss.on('connection', (browserWs) => {
       if (content.interrupted) {
         log('[Gemini] Turn interrupted by user')
         stopElevenLabs()
-        setTimeout(() => {
-          if (browserWs.readyState === WebSocket.OPEN) {
-            prepareElevenLabs()
-          }
-        }, 300)
         safeSend(browserWs, { type: 'interrupted' })
         return
       }
@@ -1657,14 +1698,18 @@ liveWss.on('connection', (browserWs) => {
               type: 'transcript_gemini',
               text: part.text,
             })
+            streamTextToElevenLabs(part.text)
           }
-          streamTextToElevenLabs(part.text)
         }
       }
 
       if (content.turnComplete) {
         log('[Gemini] Turn complete — flushing ElevenLabs')
-        flushElevenLabs()
+        if (canUseTextToSpeech()) {
+          flushElevenLabs()
+        } else {
+          safeSend(browserWs, { type: 'assistant_turn_complete' })
+        }
       }
     })
 
@@ -1699,6 +1744,7 @@ liveWss.on('connection', (browserWs) => {
         log('[Proxy] start_session received')
         sessionSystemInstruction = typeof message.systemInstruction === 'string' ? message.systemInstruction : ''
         pendingSeedTurns = Array.isArray(message.seedTurns) ? message.seedTurns : []
+        requestedGeminiModel = normalizeGeminiLiveModel(message.liveModel)
         connectGemini()
         break
       case 'audio_chunk':
@@ -1727,10 +1773,17 @@ liveWss.on('connection', (browserWs) => {
       case 'user_text': {
         const text = typeof message.text === 'string' ? message.text.trim() : ''
         if (!text || !geminiWs || geminiWs.readyState !== WebSocket.OPEN) break
+        stopElevenLabs()
         geminiWs.send(
           JSON.stringify({
-            realtimeInput: {
-              text,
+            clientContent: {
+              turns: [
+                {
+                  role: 'user',
+                  parts: [{ text }],
+                },
+              ],
+              turnComplete: true,
             },
           }),
         )

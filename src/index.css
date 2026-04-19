@@ -277,26 +277,6 @@ textarea {
   border-color: rgba(3, 105, 161, 0.22);
 }
 
-.theme-toggle__icons {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 8px;
-  pointer-events: none;
-  font-size: 11px;
-  opacity: 0.55;
-}
-
-.theme-toggle__icon--sun {
-  color: #fbbf24;
-}
-
-.theme-toggle__icon--moon {
-  color: #7dd3fc;
-}
-
 @keyframes pulse-dot {
   0%,
   100% {
@@ -395,6 +375,43 @@ textarea {
   box-decoration-break: clone;
 }
 
+.annotation-hit {
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.annotation-hit:hover {
+  background: rgba(56, 189, 248, 0.06);
+  border-color: rgba(56, 189, 248, 0.42);
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.06);
+}
+
+.annotation-hit:focus-visible {
+  outline: none;
+  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(56, 189, 248, 0.72);
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.12);
+}
+
+:root[data-theme='light'] .annotation-hit {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-theme='light'] .annotation-hit:hover {
+  background: rgba(3, 105, 161, 0.05);
+  border-color: rgba(3, 105, 161, 0.34);
+  box-shadow: 0 0 0 2px rgba(3, 105, 161, 0.05);
+}
+
+:root[data-theme='light'] .annotation-hit:focus-visible {
+  background: rgba(3, 105, 161, 0.07);
+  border-color: rgba(3, 105, 161, 0.56);
+  box-shadow: 0 0 0 3px rgba(3, 105, 161, 0.1);
+}
+
 /* Tool rail (professor PDF) */
 .tool-rail-btn {
   width: 100%;
@@ -466,6 +483,12 @@ textarea {
 .landing-nav__cell--left {
   justify-content: flex-start;
   min-width: 0;
+}
+
+.landing-nav__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
 }
 
 .landing-nav__cell--center {
@@ -700,19 +723,3 @@ textarea {
   background: rgba(3, 105, 161, 0.1);
 }
 
-.app-nav-badge {
-  font-size: 11px;
-  color: var(--primary);
-  border: 1px solid rgba(56, 189, 248, 0.45);
-  border-radius: 999px;
-  padding: 6px 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  white-space: nowrap;
-}
-
-:root[data-theme='light'] .app-nav-badge {
-  border-color: rgba(3, 105, 161, 0.35);
-  color: var(--secondary);
-  background: rgba(255, 255, 255, 0.6);
-}

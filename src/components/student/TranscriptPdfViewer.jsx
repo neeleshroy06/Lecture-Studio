@@ -138,6 +138,7 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
     () => (Array.isArray(context?.lectureMemory) ? context.lectureMemory : []),
     [context?.lectureMemory],
   )
+  const annotationCount = annotationEvents.length
 
   const strokesByPage = useMemo(() => {
     const map = new Map()
@@ -152,8 +153,15 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
   const memoryByAnnotationId = useMemo(() => {
     const map = new Map()
     if (!lectureMemory.length || !annotationEvents.length) return map
-    // Match each lecture-memory entry to the closest annotation by (page, timestamp).
     for (const entry of lectureMemory) {
+      if (Array.isArray(entry.sourceAnnotationIds) && entry.sourceAnnotationIds.length) {
+        for (const annotationId of entry.sourceAnnotationIds) {
+          if (annotationId) map.set(annotationId, entry)
+        }
+        continue
+      }
+
+      // Fallback for older lecture-memory payloads that predate sourceAnnotationIds.
       const candidates = annotationEvents.filter((stroke) => Number(stroke.page) === Number(entry.page))
       if (!candidates.length) continue
       let best = candidates[0]
@@ -338,7 +346,7 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
     return (
       <div className="glass-card" style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}>
         <div>
-          <div style={{ fontSize: 42, opacity: 0.7 }}>📄</div>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.14em', color: 'var(--text-muted)', opacity: 0.85 }}>PDF</div>
           <p style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
             {context?.lectureStatus === 'published'
               ? 'The lecture is marked as published, but no PDF package is available yet.'
@@ -357,6 +365,35 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
       <div className="glass-card" style={{ padding: 14, position: 'sticky', top: 0, zIndex: 2, marginBottom: 12 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ fontWeight: 600, fontSize: 16 }}>Course Material</div>
+          {annotationCount > 0 && (
+            <div
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '6px 10px',
+                borderRadius: 999,
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: '0.04em',
+                border: '1px solid rgba(56, 189, 248, 0.24)',
+                background: 'rgba(56, 189, 248, 0.08)',
+                color: 'var(--text-secondary)',
+              }}
+              title="Click a highlighted mark to ask Gemini Live about that exact professor annotation."
+            >
+              <span
+                style={{
+                  width: 7,
+                  height: 7,
+                  borderRadius: '50%',
+                  background: 'var(--primary)',
+                  boxShadow: '0 0 0 4px rgba(56, 189, 248, 0.14)',
+                }}
+              />
+              {annotationCount} lecture mark{annotationCount === 1 ? '' : 's'} clickable
+            </div>
+          )}
           <div style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 13 }}>
             Page {currentPage} of {pageCount || 1}
           </div>

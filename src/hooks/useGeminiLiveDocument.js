@@ -4,6 +4,7 @@ import { PcmChunkPlayer } from '../utils/pcmPlayer'
 import { buildLiveSystemInstruction } from '../utils/documentIndex'
 import { renderFirstPageJpegBase64 } from '../utils/pdfUtils'
 import { getApiBaseUrl } from '../utils/apiUrl'
+import { computeStrokeMetadata } from '../utils/annotationMetadata'
 
 function formatTimestampSeconds(ms = 0) {
   const total = Math.max(0, Math.round(Number(ms) / 1000))
@@ -43,8 +44,8 @@ function buildSeedTurns({ extractedTextForSeed, numPages, weakText, jpeg, lectur
   if (!parts.length) return []
 
   const ack = lectureMemory.length
-    ? 'Understood. I have the course document and the professor\'s lecture memory. I will answer naturally, ground my answers in the lecture and the document, and reference pages when helpful.'
-    : 'Understood. I will answer naturally, stay grounded in the course document, and reference pages when helpful.'
+    ? 'Understood. I have the course document and the lecture memory. I will answer in first person as the professor, stay grounded in what I taught and what is on the document, and reference pages when helpful.'
+    : 'Understood. I will answer in first person as the professor, stay grounded in the course document, and reference pages when helpful.'
 
   return [
     {
@@ -88,6 +89,188 @@ function getLiveWsUrl() {
   return `${protocol}//${window.location.host}/api/live`
 }
 
+const REASONING_SENTENCE_MARKERS = [
+  /\bi(?:'m| am|'ve| have)\s+(?:correctly\s+|just\s+)?(?:interpret|interpreting|interpreted|currently|still|trying|going|planning|prioritizing|considering|puzzled|focusing|crafted|noted|prepared|framed|aimed|decided|chosen|opted)/i,
+  /\bmy\s+(?:focus|primary focus|immediate instinct|attention|reasoning|approach|plan|strategy|goal|aim)\s+(?:is|was|will be)\b/i,
+  /\bi need to\b/i,
+  /\bi will\s+(?:now|aim|try|focus|mirror|avoid|provide)\b/i,
+  /\bclarifying\b/i,
+  /\bdeciphering\b/i,
+  /\backnowledg(?:e|ing)\b/i,
+  /\breasoning summar/i,
+  /\bconversational response/i,
+  /\bas per the instructions?\b/i,
+  /\bavoiding (?:any )?unnecessary\b/i,
+  /\bseems to be the most appropriate\b/i,
+  /\bappears to be the most appropriate\b/i,
+  /\bis the most appropriate (?:reply|answer|response)\b/i,
+  /\bmirror(?:ing)? the brevity\b/i,
+  /\bunnecessary elaboration\b/i,
+  /\bfactual insertions?\b/i,
+  /\bnatural flow of the\b/i,
+  /\bthe user(?:'s)? input\b/i,
+  /\bthe student(?:'s)? message\b/i,
+]
+
+const TITLE_HEADER_RE = /^((?:[A-Z][a-z]+\s+)*(?:the|a|an)\s+)?(?:[A-Z][a-z]+)(?:\s+(?:the|a|an|of|and|or|to|for))?\s+([A-Z][a-z]+)\b/
+
+function stripLeadingTitleHeader(value) {
+  // Strip patterns like "Interpreting the Greeting " or "Choosing a Reply "
+  const sentences = value.split(/(?<=[.!?])\s+/)
+  if (!sentences.length) return value
+  const first = sentences[0]
+  // Heuristic: a "header" has no terminal punctuation and is followed by another sentence
+  // beginning with a capital — and contains 2-5 Title Case words.
+  if (sentences.length > 1 && !/[.!?]$/.test(first)) {
+    const titleCaseWords = first.match(/\b[A-Z][a-z]+\b/g) || []
+    if (titleCaseWords.length >= 2 && titleCaseWords.length <= 6 && first.length <= 80) {
+      // Remove the header chunk up to where the next sentence begins.
+      // Find the boundary inside the first sentence: a TitleCase word followed by a space then a capitalized word that starts a real sentence.
+      const headerMatch = first.match(/^((?:[A-Z][a-z]+(?:\s+(?:the|a|an|of|and|or|to|for))?\s+){1,5}[A-Z][a-z]+)\s+/)
+      if (headerMatch) {
+        return value.slice(headerMatch[0].length).trim()
+      }
+    }
+  }
+  // Also handle when the whole reply starts with a bare header followed by sentence on same chunk
+  const m = value.match(/^([A-Z][a-z]+(?:\s+(?:the|a|an|of|and|or|to|for))?\s+[A-Z][a-z]+)\s+(?=[A-Z][a-z'])/)
+  if (m && TITLE_HEADER_RE.test(m[1])) {
+    return value.slice(m[0].length).trim()
+  }
+  return value
+}
+
+function sanitizeAssistantReply(text) {
+  let cleaned = String(text || '')
+    .replace(/\*\*/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  if (!cleaned) return ''
+
+  cleaned = stripLeadingTitleHeader(cleaned)
+
+  const sentences = cleaned.split(/(?<=[.!?])\s+/)
+  const kept = sentences.filter((sentence) => !REASONING_SENTENCE_MARKERS.some((rx) => rx.test(sentence)))
+  let result = kept.join(' ').trim()
+
+  if (!result) {
+    const quoted = cleaned.match(/"([^"]{1,80})"\s*(?:seems to be|is|would be|appears to be)\s+the\s+(?:most\s+)?appropriate\s+(?:reply|answer|response)/i)
+    if (quoted) {
+      result = quoted[1].trim()
+    }
+  }
+
+  if (!result) {
+    const tail = cleaned.match(/(?:^|\.\s+|!\s+|\?\s+)([A-Z][^.!?]{0,80}[.!?])\s*$/)
+    if (tail) {
+      result = tail[1].trim()
+    }
+  }
+
+  result = result.replace(/^"([^"]+)"\s*[—-]?\s*$/, '$1').trim()
+
+  return result || cleaned
+}
+
+function normalizeCompactText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function isLikelyBriefSocialTurn(text) {
+  const normalized = normalizeCompactText(text)
+  if (!normalized) return false
+
+  const wordCount = normalized.split(' ').filter(Boolean).length
+  if (wordCount > 4) return false
+
+  return /^(?:h+i+|hello+|hey+|yo+|thanks+|thank you|thx+|ok(?:ay+)?|yes+|no+|bye+|good morning|good afternoon|good evening)$/.test(normalized)
+}
+
+function buildAslUserTurn(text) {
+  const trimmed = String(text || '').replace(/\s+/g, ' ').trim()
+  if (!trimmed) return ''
+
+  const normalized = normalizeCompactText(trimmed)
+  const isShortTurn = normalized.length <= 32 && normalized.split(' ').filter(Boolean).length <= 4
+
+  let guidance = 'The student used ASL fingerspelling. Interpret obvious repeated letters or small spelling mistakes naturally.'
+  if (isLikelyBriefSocialTurn(trimmed)) {
+    guidance += ' This is a short social message, so reply with one brief social sentence only. Do not add extra help, follow-up questions, or document guidance unless the student asked for it.'
+  } else if (isShortTurn) {
+    guidance += ' Keep the reply to one short sentence unless the student clearly asked for more detail.'
+  }
+
+  return `${guidance}\nStudent message: ${trimmed}`
+}
+
+function normalizeAnnotationWords(values = []) {
+  const combined = values
+    .flatMap((value) => (Array.isArray(value) ? value : [value]))
+    .map((value) => String(value || '').toLowerCase())
+    .join(' ')
+  return combined
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length >= 3)
+}
+
+function scoreLectureMemoryEntry(entry, stroke) {
+  if (Number(entry.page) !== Number(stroke.page)) return Number.NEGATIVE_INFINITY
+
+  if (Array.isArray(entry.sourceAnnotationIds) && entry.sourceAnnotationIds.length) {
+    return entry.sourceAnnotationIds.includes(stroke.id) ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY
+  }
+
+  const delta = Math.abs((entry.timestamp ?? 0) - (stroke.startedAtMs ?? 0))
+  if (delta > 5000) return Number.NEGATIVE_INFINITY
+
+  const strokeMeta = computeStrokeMetadata(stroke)
+  let score = Math.max(0, 40 - delta / 150)
+  const strokeWords = new Set(
+    normalizeAnnotationWords([
+      stroke.nearbyText,
+      stroke.annotationLabel,
+      stroke.shapeHint,
+      stroke.regionLabel,
+    ]),
+  )
+  const entryWords = normalizeAnnotationWords([
+    entry.annotation,
+    entry.summary,
+    entry.transcript,
+    entry.shapeHints,
+    entry.regionLabels,
+  ])
+  for (const word of entryWords) {
+    if (strokeWords.has(word)) score += 4
+  }
+  if (Array.isArray(entry.regionLabels) && entry.regionLabels.includes(strokeMeta.regionLabel)) score += 6
+  if (Array.isArray(entry.shapeHints) && entry.shapeHints.includes(strokeMeta.shapeHint)) score += 6
+  return score >= 28 ? score : Number.NEGATIVE_INFINITY
+}
+
+function findClosestLectureMemoryEntry(lectureMemory = [], stroke) {
+  if (!stroke || !lectureMemory.length) return null
+
+  let best = null
+  let bestScore = Number.NEGATIVE_INFINITY
+  for (const entry of lectureMemory) {
+    const score = scoreLectureMemoryEntry(entry, stroke)
+    if (score > bestScore) {
+      best = entry
+      bestScore = score
+    }
+  }
+
+  return Number.isFinite(bestScore) && bestScore > Number.NEGATIVE_INFINITY ? best : null
+}
+
 /**
  * @param {object} options
  * @param {object | null} options.documentIndex
@@ -103,6 +286,7 @@ export default function useGeminiLiveDocument({
   lectureGroundingVersion = 0,
   runtimeStatus = null,
 }) {
+  const DEFAULT_LIVE_MODEL = 'gemini-3.1-flash-live-preview'
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState('')
   const [heardText, setHeardText] = useState('')
@@ -128,6 +312,8 @@ export default function useGeminiLiveDocument({
   const activeGroundingVersionRef = useRef(0)
   const isRefreshingSessionRef = useRef(false)
   const reconnectReasonRef = useRef('')
+  const activeModelRef = useRef(DEFAULT_LIVE_MODEL)
+  const pendingOutgoingTurnsRef = useRef([])
 
   useEffect(() => {
     playerRef.current = new PcmChunkPlayer(24000)
@@ -160,6 +346,7 @@ export default function useGeminiLiveDocument({
   const resetConversationState = useCallback(() => {
     mergedReplyRef.current = ''
     heardMergeRef.current = ''
+    pendingOutgoingTurnsRef.current = []
     pendingAssistantTurnRef.current = true
     audioPlaybackEnabledRef.current = true
     setHeardText('')
@@ -186,13 +373,45 @@ export default function useGeminiLiveDocument({
   }, [appendTranscriptEntry])
 
   const flushReplyText = useCallback(() => {
-    const finalized = mergedReplyRef.current.trim()
+    const finalized = sanitizeAssistantReply(mergedReplyRef.current)
     if (!finalized) return
     setLastReplyText(finalized)
     setLastReplyTurnId((turnId) => turnId + 1)
     appendTranscriptEntry('gemini', finalized)
     setLastEvent('assistant_turn_complete')
   }, [appendTranscriptEntry])
+
+  const sendTextTurnNow = useCallback(
+    (turn) => {
+      if (!turn?.originalText || !turn?.modelText) return false
+      if (!sessionRef.current || sessionRef.current.readyState !== WebSocket.OPEN) return false
+      flushHeardText()
+      const transcriptText = typeof turn.displayText === 'string' ? turn.displayText.trim() : turn.originalText
+      setLastHeardText(transcriptText || turn.originalText)
+      setUserInputTurnId((turnId) => turnId + 1)
+      if (!turn.hideFromTranscript && transcriptText) {
+        appendTranscriptEntry(turn.inputSource, transcriptText)
+      }
+      setLastEvent('user_turn_complete')
+      sessionRef.current.send(JSON.stringify({ type: 'user_text', text: turn.modelText }))
+      return true
+    },
+    [appendTranscriptEntry, flushHeardText],
+  )
+
+  const flushPendingOutgoingTurns = useCallback(() => {
+    if (!sessionRef.current || sessionRef.current.readyState !== WebSocket.OPEN) return
+    if (!pendingOutgoingTurnsRef.current.length) return
+
+    const queuedTurns = pendingOutgoingTurnsRef.current
+    pendingOutgoingTurnsRef.current = []
+    for (const turn of queuedTurns) {
+      if (!sendTextTurnNow(turn)) {
+        pendingOutgoingTurnsRef.current.unshift(turn)
+        break
+      }
+    }
+  }, [sendTextTurnNow])
 
   const finalizeAssistantTurn = useCallback(() => {
     flushHeardText()
@@ -209,6 +428,7 @@ export default function useGeminiLiveDocument({
         case 'gemini_connected':
           setStatus('live')
           setLastEvent('ready')
+          flushPendingOutgoingTurns()
           return
         case 'transcript_user':
           if (message.text) {
@@ -229,7 +449,7 @@ export default function useGeminiLiveDocument({
             pendingAssistantTurnRef.current = false
           }
           mergedReplyRef.current = mergeStreamingText(mergedReplyRef.current, message.text)
-          setReplyText(mergedReplyRef.current)
+          setReplyText(sanitizeAssistantReply(mergedReplyRef.current))
           setIsAssistantSpeaking(true)
           setLastEvent('assistant_speaking')
           return
@@ -242,6 +462,9 @@ export default function useGeminiLiveDocument({
           setIsAssistantSpeaking(true)
           return
         case 'speaking_end':
+          finalizeAssistantTurn()
+          return
+        case 'assistant_turn_complete':
           finalizeAssistantTurn()
           return
         case 'interrupted':
@@ -264,7 +487,7 @@ export default function useGeminiLiveDocument({
         default:
       }
     },
-    [clearAssistantPlayback, finalizeAssistantTurn, flushHeardText, playAssistantAudioChunk],
+    [clearAssistantPlayback, finalizeAssistantTurn, flushHeardText, flushPendingOutgoingTurns, playAssistantAudioChunk],
   )
 
   const buildSessionPayload = useCallback(async () => {
@@ -293,7 +516,7 @@ export default function useGeminiLiveDocument({
     }
   }, [annotationEvents, documentIndex, getPdfDocument, lectureMemory])
 
-  const startLive = useCallback(async () => {
+  const startLive = useCallback(async (options = {}) => {
     if (!documentIndex) {
       setError('Wait for the document index to finish building.')
       setStatus('error')
@@ -310,6 +533,8 @@ export default function useGeminiLiveDocument({
 
     try {
       const sessionPayload = await buildSessionPayload()
+      const requestedModel = typeof options.liveModel === 'string' && options.liveModel.trim() ? options.liveModel.trim() : activeModelRef.current
+      activeModelRef.current = requestedModel
 
       const connectionId = connectionIdRef.current + 1
       connectionIdRef.current = connectionId
@@ -328,6 +553,7 @@ export default function useGeminiLiveDocument({
         ws.send(
           JSON.stringify({
             type: 'start_session',
+            liveModel: requestedModel,
             ...sessionPayload,
           }),
         )
@@ -420,17 +646,29 @@ export default function useGeminiLiveDocument({
   }, [clearAssistantPlayback])
 
   const sendText = useCallback(
-    (text) => {
+    (text, options = {}) => {
       const trimmed = text?.trim()
-      if (!trimmed || !sessionRef.current || status !== 'live' || sessionRef.current.readyState !== WebSocket.OPEN) return
-      flushHeardText()
-      setLastHeardText(trimmed)
-      setUserInputTurnId((turnId) => turnId + 1)
-      appendTranscriptEntry('user', trimmed)
-      setLastEvent('user_turn_complete')
-      sessionRef.current.send(JSON.stringify({ type: 'user_text', text: trimmed }))
+      if (!trimmed) return
+      const inputSource = options.inputSource === 'asl' ? 'asl' : 'user'
+      const modelText = inputSource === 'asl' ? buildAslUserTurn(trimmed) : trimmed
+      const turn = {
+        originalText: trimmed,
+        inputSource,
+        modelText,
+        displayText: typeof options.displayText === 'string' ? options.displayText : trimmed,
+        hideFromTranscript: Boolean(options.hideFromTranscript),
+      }
+
+      if (status === 'live' && sessionRef.current?.readyState === WebSocket.OPEN) {
+        sendTextTurnNow(turn)
+        return
+      }
+
+      if (status === 'connecting' || sessionRef.current?.readyState === WebSocket.CONNECTING) {
+        pendingOutgoingTurnsRef.current.push(turn)
+      }
     },
-    [appendTranscriptEntry, flushHeardText, status],
+    [sendTextTurnNow, status],
   )
 
   const sendMicPcm = useCallback(
@@ -455,18 +693,37 @@ export default function useGeminiLiveDocument({
     (annotationId) => {
       const stroke = annotationEvents.find((event) => event.id === annotationId)
       if (!stroke) return ''
-      const memory = lectureMemory.find(
-        (entry) =>
-          Number(entry.page) === Number(stroke.page) &&
-          Math.abs((entry.timestamp ?? 0) - (stroke.startedAtMs ?? 0)) < 8000,
-      )
-      const verb = stroke.tool === 'highlighter' ? 'highlighted' : 'drew on'
+      const strokeMeta = computeStrokeMetadata(stroke)
+      const memory = findClosestLectureMemoryEntry(lectureMemory, stroke)
       const nearby = Array.isArray(stroke.nearbyText) ? stroke.nearbyText.slice(0, 6).join(' ') : ''
-      const transcriptExcerpt = memory?.transcript ? memory.transcript.slice(0, 400) : ''
-      const summary = memory?.summary ? ` Summary: ${memory.summary}` : ''
-      const said = transcriptExcerpt ? ` Around that moment they said: "${transcriptExcerpt}".` : ''
-      const region = nearby ? `"${nearby.slice(0, 160)}"` : 'a page region'
-      return `[annotation:${annotationId}] On page ${stroke.page} the professor ${verb} ${region}.${said}${summary}`
+      const transcriptExcerpt = memory?.transcript ? memory.transcript.slice(0, 280) : ''
+      const summary = memory?.summary ? memory.summary.trim() : ''
+      const label = stroke.annotationLabel ? stroke.annotationLabel.slice(0, 160) : ''
+      const action = stroke.tool === 'highlighter' ? 'highlighted' : 'drew'
+
+      return [
+        `[annotation:${annotationId}]`,
+        'SELECTED ANNOTATION ONLY:',
+        'LATEST SELECTED ANNOTATION: This selected annotation replaces any previously selected annotation context in the conversation.',
+        `- annotation_id: ${annotationId}`,
+        `- page: ${stroke.page}`,
+        `- action: the professor ${action} this exact mark`,
+        `- shape_hint: ${stroke.shapeHint || strokeMeta.shapeHint}`,
+        `- location: ${stroke.regionLabel || strokeMeta.regionLabel}`,
+        `- center_pct: x=${Math.round((stroke.centerX ?? strokeMeta.centerX) * 100)}, y=${Math.round((stroke.centerY ?? strokeMeta.centerY) * 100)}`,
+        `- size_pct: width=${Math.round((stroke.bounds?.width ?? strokeMeta.bounds.width) * 100)}, height=${Math.round((stroke.bounds?.height ?? strokeMeta.bounds.height) * 100)}`,
+        label ? `- label: ${label}` : '',
+        nearby ? `- nearby_text: ${nearby.slice(0, 220)}` : '',
+        summary ? `- lecture_summary: ${summary}` : '',
+        transcriptExcerpt ? `- transcript_excerpt: ${transcriptExcerpt}` : '',
+        Array.isArray(memory?.sourceAnnotationIds) && memory.sourceAnnotationIds.length
+          ? `- lecture_memory_annotation_ids: ${memory.sourceAnnotationIds.join(', ')}`
+          : '',
+        'STRICT RULE: Answer only about this selected annotation. Ignore every other annotation, drawing, and highlight unless the student explicitly asks to compare them.',
+        'STRICT RULE: If another annotation has different nearby text, shape, or location, it is not the one the student selected.',
+      ]
+        .filter(Boolean)
+        .join('\n')
     },
     [annotationEvents, lectureMemory],
   )
@@ -479,8 +736,12 @@ export default function useGeminiLiveDocument({
     (annotationId, customQuestion = '') => {
       const preamble = buildAnnotationPreamble(annotationId)
       if (!preamble) return
-      const question = customQuestion?.trim() || `Why did the professor ${preamble.includes('highlighted') ? 'highlight this' : 'draw this'}? Explain what they meant by it.`
-      sendText(`${preamble} The student is asking: ${question}`)
+      const question =
+        customQuestion?.trim() ||
+        `What did you mean here, and why did you ${preamble.includes('highlighted') ? 'highlight this' : 'draw this'}?`
+      sendText(`${preamble}\nSTUDENT QUESTION: ${question}\nFINAL RULE: Answer from the selected annotation block only. Do not mention any other annotation unless the student explicitly asks for a comparison.`, {
+        displayText: question,
+      })
     },
     [buildAnnotationPreamble, sendText],
   )
@@ -494,7 +755,9 @@ export default function useGeminiLiveDocument({
     (annotationId) => {
       const preamble = buildAnnotationPreamble(annotationId)
       if (!preamble) return
-      sendText(`${preamble} I'm about to ask you a question about this annotation by voice.`)
+      sendText(`${preamble} The student is about to ask a voice follow-up about only this selected annotation.`, {
+        hideFromTranscript: true,
+      })
     },
     [buildAnnotationPreamble, sendText],
   )

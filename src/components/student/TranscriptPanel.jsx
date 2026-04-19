@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef } from 'react'
 import { formatTime } from '../../utils/audioUtils'
 
 const ROLE_META = {
-  user: { icon: '🎤', label: 'You', color: 'var(--text-secondary)' },
-  gemini: { icon: '🎓', label: 'Professor', color: 'var(--primary)' },
-  asl: { icon: '🤟', label: 'ASL', color: 'var(--secondary)' },
+  user: { label: 'You', color: 'var(--text-secondary)' },
+  gemini: { label: 'Professor', color: 'var(--primary)' },
+  asl: { label: 'ASL', color: 'var(--secondary)' },
 }
 
 export default function TranscriptPanel({ entries }) {
@@ -35,8 +35,9 @@ export default function TranscriptPanel({ entries }) {
               aria-label="Copy transcript"
               className="icon-button"
               onClick={() => navigator.clipboard.writeText(transcriptText)}
+              style={{ fontSize: 12, fontWeight: 600 }}
             >
-              ⧉
+              Copy
             </button>
             <button
               type="button"
@@ -52,7 +53,7 @@ export default function TranscriptPanel({ entries }) {
                 URL.revokeObjectURL(url)
               }}
             >
-              ↓
+              Save
             </button>
           </div>
         </div>
@@ -78,9 +79,8 @@ export default function TranscriptPanel({ entries }) {
                 }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: meta.color, marginBottom: 8 }}>
-                  <span>{meta.icon}</span>
                   <span style={{ fontWeight: 600 }}>{meta.label}</span>
-                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>· {formatTime(entry.timestamp)}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{formatTime(entry.timestamp)}</span>
                 </div>
                 <div className="transcript-mono" style={{ fontSize: 12, lineHeight: 1.6 }}>
                   {entry.text}

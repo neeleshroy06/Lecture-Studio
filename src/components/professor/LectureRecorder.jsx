@@ -25,7 +25,6 @@ export default function LectureRecorder({
   onLectureStart,
   onLectureProcessed,
   processingError,
-  annotationCount,
   canStartLecture,
 }) {
   const recorder = useAudioRecorder()
@@ -230,7 +229,7 @@ export default function LectureRecorder({
               {recorder.isPaused ? 'Resume' : 'Pause'}
             </button>
             <button type="button" aria-label="Stop and transcribe lecture" className="btn-danger" onClick={handleStop}>
-              ⏹ Stop &amp; Transcribe
+              Stop and transcribe
             </button>
           </div>
         </div>
@@ -280,7 +279,7 @@ export default function LectureRecorder({
               </h2>
               <p style={{ margin: 0, color: 'var(--text-secondary)', fontSize: 13 }}>
                 {lectureStatus === 'published'
-                  ? `${annotationCount} slide ${annotationCount === 1 ? 'annotation' : 'annotations'} included in the published package.`
+                  ? 'Slide annotations are included in the published package.'
                   : 'Review the transcript before students receive the lecture package.'}
               </p>
             </div>
@@ -334,7 +333,7 @@ export default function LectureRecorder({
 
           <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
             <button type="button" aria-label="Edit transcript" className="btn-secondary" onClick={() => setExpanded(true)}>
-              ✎ Edit
+              Edit
             </button>
             <button
               type="button"
@@ -345,7 +344,7 @@ export default function LectureRecorder({
                 setViewState('idle')
               }}
             >
-              ↺ New Lecture
+              New lecture
             </button>
           </div>
           {(error || processingError) && (

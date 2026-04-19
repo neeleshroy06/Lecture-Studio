@@ -15,10 +15,6 @@ export default function ThemeToggle({ className = '' }) {
       <span className="theme-toggle__track" aria-hidden="true">
         <span className="theme-toggle__thumb" />
       </span>
-      <span className="theme-toggle__icons" aria-hidden="true">
-        <span className="theme-toggle__icon theme-toggle__icon--moon">☾</span>
-        <span className="theme-toggle__icon theme-toggle__icon--sun">☀</span>
-      </span>
     </button>
   )
 }

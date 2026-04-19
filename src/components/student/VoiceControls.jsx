@@ -1,5 +1,32 @@
-function MicIcon({ muted }) {
-  return muted ? '🔇' : '🎤'
+function MicGlyph({ muted }) {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 14a3 3 0 003-3V7a3 3 0 10-6 0v4a3 3 0 003 3z"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+      />
+      <path d="M8 11v1a4 4 0 008 0v-1M12 18v3M8 21h8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      {muted && <path d="M4 4l16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />}
+    </svg>
+  )
+}
+
+function PlayGlyph() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M8 5v14l11-7L8 5z" />
+    </svg>
+  )
+}
+
+function PauseGlyph() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+      <path d="M6 5h4v14H6V5zm8 0h4v14h-4V5z" />
+    </svg>
+  )
 }
 
 export default function VoiceControls({
@@ -20,7 +47,7 @@ export default function VoiceControls({
         style={{ width: 200, height: 52 }}
         onClick={onStartSession}
       >
-        ▶ Start Session
+        Start session
       </button>
     )
   }
@@ -51,7 +78,9 @@ export default function VoiceControls({
         onClick={onMicToggle}
         style={{ background: isMicMuted ? 'var(--danger)' : 'var(--surface-raised)' }}
       >
-        <span aria-hidden="true">{MicIcon({ muted: isMicMuted })}</span>
+        <span aria-hidden="true">
+          <MicGlyph muted={isMicMuted} />
+        </span>
       </button>
 
       <button
@@ -61,7 +90,7 @@ export default function VoiceControls({
         className="icon-button"
         onClick={onPauseToggle}
       >
-        <span aria-hidden="true">{isPaused ? '▶' : '⏸'}</span>
+        <span aria-hidden="true">{isPaused ? <PlayGlyph /> : <PauseGlyph />}</span>
       </button>
 
       <button

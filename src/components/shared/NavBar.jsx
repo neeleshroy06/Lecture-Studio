@@ -1,4 +1,5 @@
 import ThemeToggle from './ThemeToggle'
+import AppLogo from './AppLogo'
 
 export default function NavBar({ activeTab, onTabChange }) {
   const tabs = [
@@ -22,24 +23,7 @@ export default function NavBar({ activeTab, onTabChange }) {
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
-        <div
-          aria-hidden="true"
-          style={{
-            width: 32,
-            height: 32,
-            borderRadius: 8,
-            background: 'linear-gradient(135deg, var(--primary), var(--accent))',
-            display: 'grid',
-            placeItems: 'center',
-            fontSize: 15,
-            fontWeight: 800,
-            color: 'var(--nav-mark-text)',
-            boxShadow: '0 0 22px var(--primary-glow)',
-            flexShrink: 0,
-          }}
-        >
-          LS
-        </div>
+        <AppLogo size={36} />
         <span style={{ fontWeight: 700, fontSize: 18, letterSpacing: '-0.03em', whiteSpace: 'nowrap' }}>Lecture Studio</span>
       </div>
 
@@ -59,7 +43,6 @@ export default function NavBar({ activeTab, onTabChange }) {
 
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 12, minWidth: 0 }}>
         <ThemeToggle />
-        <div className="app-nav-badge">ADA Compliant</div>
       </div>
     </nav>
   )

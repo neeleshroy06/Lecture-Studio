@@ -5,9 +5,19 @@ import VoiceControls from '../components/student/VoiceControls'
 import InputModeToggle from '../components/student/InputModeToggle'
 import ASLCamera from '../components/student/ASLCamera'
 import TranscriptPanel from '../components/student/TranscriptPanel'
-import CaptionsBar from '../components/student/CaptionsBar'
 import { useMicStream } from '../hooks/useAudioRecorder'
 import { GeminiLiveDocumentProvider, useGeminiLiveDocumentContext } from '../context/GeminiLiveDocumentContext'
+
+const DEFAULT_VOICE_LIVE_MODEL = 'gemini-3.1-flash-live-preview'
+const DEFAULT_ASL_LIVE_MODEL = 'gemini-2.5-flash-native-audio-preview-12-2025'
+
+function resolveLiveModel(envKey, fallback) {
+  const candidate = import.meta.env?.[envKey]
+  return typeof candidate === 'string' && candidate.trim() ? candidate.trim() : fallback
+}
+
+const VOICE_LIVE_MODEL = resolveLiveModel('VITE_GEMINI_LIVE_MODEL', DEFAULT_VOICE_LIVE_MODEL)
+const ASL_LIVE_MODEL = resolveLiveModel('VITE_GEMINI_LIVE_MODEL_ASL', DEFAULT_ASL_LIVE_MODEL)
 
 function StudentPageContent() {
   const live = useGeminiLiveDocumentContext()
@@ -44,15 +54,12 @@ function StudentPageContent() {
     onAudioChunk: live.sendMicPcm,
   })
 
-  const captionSpeaker = live.isAssistantSpeaking ? 'Professor' : live.heardText ? 'You' : ''
-  const captionText = live.isAssistantSpeaking ? live.replyText : live.heardText
-
   useEffect(() => {
-    const match = captionText.match(/\[page:(\d+)\]/i)
+    const match = (live.isAssistantSpeaking ? live.replyText : live.heardText).match(/\[page:(\d+)\]/i)
     if (match) {
       documentViewerRef.current?.scrollToPage(Number(match[1]))
     }
-  }, [captionText])
+  }, [live.heardText, live.isAssistantSpeaking, live.replyText])
 
   useEffect(() => {
     if (!sessionActive) return
@@ -83,7 +90,8 @@ function StudentPageContent() {
       display: 'flex',
       flexDirection: 'column',
       alignItems: 'stretch',
-      padding: '24px 24px 92px',
+      gap: 16,
+      padding: 24,
       borderLeft: '1px solid var(--border)',
       borderRight: '1px solid var(--border)',
     }),
@@ -91,8 +99,8 @@ function StudentPageContent() {
   )
 
   return (
-    <div className="animate-fade-in" style={{ height: '100%', display: 'flex', overflow: 'hidden', padding: '12px 12px 12px 12px' }}>
-      <div className="muted-scrollbar" style={{ width: '38%', overflowY: 'auto', padding: 12 }}>
+    <div className="animate-fade-in" style={{ height: '100%', display: 'flex', overflow: 'hidden', padding: 12 }}>
+      <div className="muted-scrollbar" style={{ width: '38%', overflowY: 'auto', padding: 12, minHeight: 0 }}>
         <TranscriptPdfViewer ref={documentViewerRef} />
       </div>
 
@@ -102,9 +110,59 @@ function StudentPageContent() {
         </div>
 
         {inputMode === 'voice' && (
-          <div style={{ flex: '1 1 auto', display: 'grid', placeItems: 'center', width: '100%', paddingTop: 18, minHeight: 0 }}>
-            <div style={{ transition: 'transform 0.2s ease' }}>
-              <VoiceOrb orbState={orbState} audioLevel={audioLevel} />
+          <div
+            className="glass-card"
+            style={{
+              flex: '1 1 auto',
+              minHeight: 0,
+              width: '100%',
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              gap: 20,
+              padding: '28px 24px 24px',
+            }}
+          >
+            <div style={{ flex: 1, minHeight: 0, display: 'grid', placeItems: 'center', width: '100%' }}>
+              <div style={{ transition: 'transform 0.2s ease' }}>
+                <VoiceOrb orbState={orbState} audioLevel={audioLevel} />
+              </div>
+            </div>
+
+            <div style={{ width: '100%', display: 'flex', justifyContent: 'center' }}>
+              <VoiceControls
+                isMicMuted={isMicMuted}
+                onMicToggle={() =>
+                  setIsMicMuted((value) => {
+                    if (!value && live.status === 'live') {
+                      live.sendAudioStreamEnd()
+                    }
+                    return !value
+                  })
+                }
+                isPaused={isPaused}
+                onPauseToggle={async () => {
+                  if (isPaused) {
+                    await live.resumeAssistantAudio()
+                  } else {
+                    live.pauseAssistantAudio()
+                  }
+                  setIsPaused((value) => !value)
+                }}
+                onEndSession={() => {
+                  live.stopLive()
+                  setIsMicMuted(false)
+                  setIsPaused(false)
+                }}
+                sessionState={voiceSessionState}
+                onStartSession={async () => {
+                  setIsPaused(false)
+                  setIsMicMuted(false)
+                  await live.preparePlayback()
+                  await live.startLive({ liveModel: VOICE_LIVE_MODEL })
+                }}
+              />
             </div>
           </div>
         )}
@@ -113,11 +171,9 @@ function StudentPageContent() {
           <div
             style={{
               width: '100%',
-              flex: 1,
+              flex: '1 1 auto',
               minHeight: 0,
               display: 'flex',
-              flexDirection: 'column',
-              marginTop: 8,
             }}
           >
             <ASLCamera
@@ -127,7 +183,7 @@ function StudentPageContent() {
                 setIsPaused(false)
                 setIsMicMuted(true)
                 await live.preparePlayback()
-                await live.startLive()
+                await live.startLive({ liveModel: ASL_LIVE_MODEL })
               }}
               onEndSession={() => {
                 live.stopLive()
@@ -135,77 +191,40 @@ function StudentPageContent() {
                 setIsPaused(false)
               }}
               onSpelledWord={(text) => {
-                live.sendText(text)
+                live.sendText(text, { inputSource: 'asl' })
               }}
             />
           </div>
         )}
 
-        {inputMode === 'voice' && (
-          <div style={{ marginTop: 20, position: 'relative', zIndex: 10, flexShrink: 0 }}>
-            <VoiceControls
-              isMicMuted={isMicMuted}
-              onMicToggle={() =>
-                setIsMicMuted((value) => {
-                  if (!value && live.status === 'live') {
-                    live.sendAudioStreamEnd()
-                  }
-                  return !value
-                })
-              }
-              isPaused={isPaused}
-              onPauseToggle={async () => {
-                if (isPaused) {
-                  await live.resumeAssistantAudio()
-                } else {
-                  live.pauseAssistantAudio()
-                }
-                setIsPaused((value) => !value)
-              }}
-              onEndSession={() => {
-                live.stopLive()
-                setIsMicMuted(false)
-                setIsPaused(false)
-              }}
-              sessionState={voiceSessionState}
-              onStartSession={async () => {
-                setIsPaused(false)
-                setIsMicMuted(false)
-                await live.preparePlayback()
-                await live.startLive()
-              }}
-            />
-          </div>
-        )}
-
-        {(live.error || micStream.error) && <p style={{ color: 'var(--danger)', fontSize: 13, marginTop: 12 }}>{live.error || micStream.error}</p>}
+        {(live.error || micStream.error) && <p style={{ color: 'var(--danger)', fontSize: 13, margin: 0 }}>{live.error || micStream.error}</p>}
         {live.status === 'connecting' && (
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 12 }}>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 13, margin: 0 }}>
             {live.lastEvent === 'context_refresh' ? 'Refreshing live session with the latest lecture context...' : 'Connecting to live session...'}
           </p>
         )}
-        {live.status === 'closing' && <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 12 }}>Closing live session...</p>}
+        {live.status === 'closing' && <p style={{ color: 'var(--text-muted)', fontSize: 13, margin: 0 }}>Closing live session...</p>}
         {!live.hasLiveBackend && (
-          <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>
+          <p style={{ color: 'var(--text-muted)', fontSize: 12, margin: 0 }}>
             Set <code style={{ fontFamily: 'inherit' }}>GEMINI_API_KEY</code> and <code style={{ fontFamily: 'inherit' }}>ELEVENLABS_API_KEY</code> in <code style={{ fontFamily: 'inherit' }}>.env</code> so the backend live proxy can connect and speak back.
           </p>
         )}
         {live.runtimeStatus?.lectureMemoryMode === 'pending' && (
-          <p style={{ color: 'var(--amber)', fontSize: 12, marginTop: 8 }}>
-            The annotated PDF is ready. Background enrichment is still running—answers will improve shortly.
+          <p style={{ color: 'var(--amber)', fontSize: 12, margin: 0 }}>
+            Enriching lecture context in the background—answers will improve shortly.
           </p>
         )}
         {live.runtimeStatus?.lectureMemoryMode === 'error' && (
-          <p style={{ color: 'var(--amber)', fontSize: 12, marginTop: 8 }}>
-            Some background services are unavailable. You can still ask about the document and slide marks.
+          <p style={{ color: 'var(--amber)', fontSize: 12, margin: 0 }}>
+            Some background services are unavailable. You can still ask about the document and the slides.
           </p>
         )}
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
           <span
             title={
               hasPublishedDeck
-                ? `${annotationEvents.length} professor marks on the slides. Click a highlighted region to ask about it.`
+                ? 'Professor marks appear on the slides. Click a highlighted region to ask about it.'
                 : 'No lecture has been published yet — answers will follow the document text only.'
             }
             style={{
@@ -232,31 +251,15 @@ function StudentPageContent() {
               }}
             />
             {live.runtimeStatus?.lectureMemoryMode === 'pending'
-              ? `Enriching · ${annotationEvents.length} slide marks`
+              ? 'Enriching'
               : hasPublishedDeck
-                ? `${annotationEvents.length} slide marks`
+                ? 'Lecture deck'
                 : 'Document only (no lecture published)'}
           </span>
         </div>
-
-        <CaptionsBar speaker={captionSpeaker} caption={(captionText || '').replace(/\[page:\d+\]\s*/i, '')} />
-
-        {live.status === 'live' && (
-          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 10, width: '100%', maxWidth: 420, lineHeight: 1.45 }}>
-            <div>
-              <span style={{ color: 'var(--text-secondary)' }}>You (stream):</span> {live.heardText || '…'}
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <span style={{ color: 'var(--text-secondary)' }}>Assistant (stream):</span> {live.replyText || '…'}
-            </div>
-            <div style={{ marginTop: 6 }}>
-              <span style={{ color: 'var(--text-secondary)' }}>Last heard:</span> {live.lastHeardText || 'Waiting for speech…'}
-            </div>
-          </div>
-        )}
       </div>
 
-      <div className="muted-scrollbar" style={{ width: '25%', overflowY: 'auto', padding: 12 }}>
+      <div className="muted-scrollbar" style={{ width: '25%', overflowY: 'auto', padding: 12, minHeight: 0 }}>
         <TranscriptPanel entries={live.transcriptEntries} />
       </div>
     </div>

@@ -1,4 +1,5 @@
 import ThemeToggle from '../components/shared/ThemeToggle'
+import AppLogo from '../components/shared/AppLogo'
 
 const FEATURES = [
   {
@@ -28,6 +29,7 @@ export default function LandingPage({ onGetStarted, onViewDemo }) {
     <div className="landing-root">
       <header className="landing-nav">
         <div className="landing-nav__brand landing-nav__cell landing-nav__cell--left">
+          <AppLogo size={40} />
           <span className="landing-brand-text">Lecture Studio</span>
         </div>
         <nav className="landing-nav__cell landing-nav__cell--center" aria-label="Primary">

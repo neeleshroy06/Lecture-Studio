@@ -189,19 +189,8 @@ export default function AnnotatedPdfPage({
               width: `${Math.max(2.5, bounds.width * 100)}%`,
               height: `${Math.max(2.5, bounds.height * 100)}%`,
               borderRadius: 6,
-              border: '1px solid transparent',
-              background: 'transparent',
               cursor: 'pointer',
               padding: 0,
-              transition: 'background 120ms ease, border-color 120ms ease',
-            }}
-            onMouseEnter={(event) => {
-              event.currentTarget.style.background = 'rgba(56,189,248,0.2)'
-              event.currentTarget.style.borderColor = 'rgba(56,189,248,0.55)'
-            }}
-            onMouseLeave={(event) => {
-              event.currentTarget.style.background = 'transparent'
-              event.currentTarget.style.borderColor = 'transparent'
             }}
           />
         )

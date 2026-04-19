@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { renderTextLayer } from 'pdfjs-dist/build/pdf'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import { loadPdfFromBase64 } from '../../utils/pdfUtils'
+import { computeStrokeMetadata } from '../../utils/annotationMetadata'
 
 function readFileAsBase64(file) {
   return new Promise((resolve, reject) => {
@@ -72,10 +73,18 @@ function summariseTool(tool) {
 
 function buildAnnotationLabel(stroke) {
   const nearbyText = Array.isArray(stroke.nearbyText) ? stroke.nearbyText.filter(Boolean).slice(0, 6).join(' ') : ''
+  const shapeHint = stroke.shapeHint || 'mark'
+  const regionLabel = stroke.regionLabel || 'page region'
   if (nearbyText) {
-    return `${summariseTool(stroke.tool)} "${nearbyText.slice(0, 180)}"`
+    if (stroke.tool === 'highlighter') {
+      return `highlighted "${nearbyText.slice(0, 180)}"`
+    }
+    return `drew a ${shapeHint} near "${nearbyText.slice(0, 180)}"`
   }
-  return `${summariseTool(stroke.tool)} page region`
+  if (stroke.tool === 'highlighter') {
+    return `highlighted the ${regionLabel}`
+  }
+  return `drew a ${shapeHint} at the ${regionLabel}`
 }
 
 function RailToolButton({ active, children, disabled, ...props }) {
@@ -437,13 +446,19 @@ export default function ProfessorDocumentWorkspace({
       if (!stroke?.points?.length) return
       const bounds = getStrokeBounds(stroke.points)
       const nearbyText = collectNearbyText(stroke.page, bounds)
-      const nextStroke = {
+      const metadata = computeStrokeMetadata({
         ...stroke,
         bounds,
         nearbyText,
+      })
+      const nextStroke = {
+        ...stroke,
+        nearbyText,
+        ...metadata,
         annotationLabel: buildAnnotationLabel({
           ...stroke,
           nearbyText,
+          ...metadata,
         }),
       }
       onAnnotationEventsChange((current) => [...current, nextStroke])
@@ -525,10 +540,7 @@ export default function ProfessorDocumentWorkspace({
 
   const annotationSummary = useMemo(() => {
     if (!annotationEvents.length) return 'No annotations yet.'
-    const pages = new Set(annotationEvents.map((stroke) => stroke.page)).size
-    const highlights = annotationEvents.filter((stroke) => stroke.tool === 'highlighter').length
-    const drawings = annotationEvents.length - highlights
-    return `${annotationEvents.length} marks across ${pages} pages · ${drawings} pen · ${highlights} highlighter`
+    return 'Slide annotations on deck'
   }, [annotationEvents])
 
   const toolsColumn = (

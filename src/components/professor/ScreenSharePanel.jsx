@@ -26,7 +26,7 @@ export default function ScreenSharePanel() {
     <section className="glass-card" style={{ padding: 24 }}>
       {!capture.active ? (
         <div>
-          <div style={{ fontSize: 40, color: 'var(--secondary)' }}>🖥️</div>
+          <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--secondary)' }}>Screen</div>
           <h3 style={{ fontSize: 18, margin: '12px 0 8px' }}>Live Screen Share</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: 13, lineHeight: 1.6, marginBottom: 18 }}>
             Share your screen so Gemini can see your slides, annotations, and anything you draw in real time

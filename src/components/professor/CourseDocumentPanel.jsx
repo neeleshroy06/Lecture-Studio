@@ -133,7 +133,7 @@ export default function CourseDocumentPanel() {
               color: status === 'ready' ? 'var(--secondary)' : status === 'error' ? 'var(--danger)' : 'var(--text-muted)',
             }}
           >
-            {status === 'ready' ? '✓' : status === 'error' ? '⚠' : '…'}
+            {status === 'ready' ? 'OK' : status === 'error' ? '!' : '...'}
           </span>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</div>

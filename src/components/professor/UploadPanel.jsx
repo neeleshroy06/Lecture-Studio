@@ -100,13 +100,13 @@ export default function UploadPanel({ onPdfReady, onHandwritingOCR, onTypedNotes
   return (
     <section className="glass-card" style={{ padding: 24 }}>
       <div>
-        <div style={{ fontSize: 32, color: 'var(--primary)' }}>📄</div>
+        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.14em', color: 'var(--primary)' }}>PDF</div>
         <h3 style={{ margin: '10px 0 14px', fontSize: 16 }}>Course Document</h3>
         {!pdfFile ? (
           <UploadZone label="Upload course PDF" accept=".pdf,application/pdf" onFile={handlePdf} description="Drag PDF here or click to browse" />
         ) : (
           <div className="glass-card" style={{ padding: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
-            <span style={{ fontSize: 22, color: 'var(--secondary)' }}>✓</span>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--secondary)' }}>OK</span>
             <div>
               <div>{pdfFile.name}</div>
               <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{(pdfFile.size / 1024 / 1024).toFixed(2)} MB</div>
@@ -118,7 +118,7 @@ export default function UploadPanel({ onPdfReady, onHandwritingOCR, onTypedNotes
       <div style={{ borderTop: '1px solid var(--border)', margin: '20px 0', paddingTop: 20 }} />
 
       <div>
-        <div style={{ fontSize: 32, color: 'var(--secondary)' }}>✍️</div>
+        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--secondary)' }}>Notes</div>
         <h3 style={{ margin: '10px 0 4px', fontSize: 16 }}>Handwritten Notes</h3>
         <p style={{ margin: '0 0 14px', color: 'var(--text-muted)', fontSize: 13 }}>
           Gemini will read your handwriting automatically
@@ -161,7 +161,7 @@ export default function UploadPanel({ onPdfReady, onHandwritingOCR, onTypedNotes
                 />
               )}
               <div>
-                <div style={{ color: 'var(--secondary)', fontWeight: 600 }}>Notes extracted ✓</div>
+                <div style={{ color: 'var(--secondary)', fontWeight: 600 }}>Notes extracted</div>
                 <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{ocrState.fileName}</div>
               </div>
             </div>
@@ -188,7 +188,7 @@ export default function UploadPanel({ onPdfReady, onHandwritingOCR, onTypedNotes
       <div style={{ borderTop: '1px solid var(--border)', margin: '20px 0', paddingTop: 20 }} />
 
       <div>
-        <div style={{ fontSize: 32, color: 'var(--text-secondary)' }}>📝</div>
+        <div style={{ fontSize: 13, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--text-secondary)' }}>Text</div>
         <h3 style={{ margin: '10px 0 12px', fontSize: 16 }}>Typed Reference Notes</h3>
         <textarea
           aria-label="Typed reference notes"

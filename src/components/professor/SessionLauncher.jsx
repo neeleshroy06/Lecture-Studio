@@ -4,7 +4,17 @@ import axios from 'axios'
 function ChecklistItem({ done, label, optional }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', height: 36 }}>
-      <span style={{ width: 24, color: done ? 'var(--secondary)' : 'var(--text-muted)' }}>{done ? '✓' : '○'}</span>
+      <span
+        style={{
+          width: 28,
+          fontSize: 11,
+          fontWeight: 600,
+          fontFamily: 'JetBrains Mono, monospace',
+          color: done ? 'var(--secondary)' : 'var(--text-muted)',
+        }}
+      >
+        {done ? '[x]' : '[ ]'}
+      </span>
       <span style={{ flex: 1 }}>{label}</span>
       {optional && (
         <span
@@ -74,7 +84,7 @@ export default function SessionLauncher({
         disabled={disabled || loading}
         onClick={handleLaunch}
       >
-        {loading ? 'Preparing session...' : 'Launch Student Session →'}
+        {loading ? 'Preparing session...' : 'Launch student session'}
       </button>
 
       {disabled && <p style={{ marginTop: 8, color: 'var(--text-muted)', fontSize: 12 }}>Complete lecture recording and voice clone to continue</p>}

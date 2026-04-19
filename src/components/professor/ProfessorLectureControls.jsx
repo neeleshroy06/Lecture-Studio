@@ -17,7 +17,6 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
     processingError,
     processingNotice,
     runtimeStatus,
-    annotationCount,
     hideIdlePlaceholder,
   },
   ref,
@@ -313,10 +312,10 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
               <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 13, maxWidth: 420 }}>
                 {lectureStatus === 'published'
                   ? runtimeStatus?.lectureMemoryMode === 'pending'
-                    ? `Students can open the annotated PDF now. Background enrichment is processing ${annotationCount} annotations.`
+                    ? 'Students can open the annotated PDF now. Background enrichment is running—answers will improve shortly.'
                     : runtimeStatus?.lectureMemoryMode === 'error'
                       ? 'The lecture package is live for students. Some background services are unavailable.'
-                      : `Published with ${annotationCount} slide ${annotationCount === 1 ? 'annotation' : 'annotations'}.`
+                      : 'Published with your slide annotations included.'
                   : 'Review the transcript below.'}
               </p>
             </div>

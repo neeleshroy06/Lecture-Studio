@@ -57,7 +57,6 @@ export default function VoiceCloningPanel({ onVoiceCloned }) {
   return (
     <section className="glass-card" style={{ padding: 24 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <div style={{ color: 'var(--primary)', fontSize: 20 }}>▁▃▆▃▁</div>
         <div>
           <h3 style={{ margin: 0, fontSize: 18 }}>Clone Your Voice</h3>
           <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 13 }}>
@@ -97,7 +96,7 @@ export default function VoiceCloningPanel({ onVoiceCloned }) {
               style={{ width: '100%' }}
               onClick={handleRecordingStart}
             >
-              🎙 Record Voice Sample
+              Record voice sample
             </button>
             <button
               type="button"
@@ -129,7 +128,7 @@ export default function VoiceCloningPanel({ onVoiceCloned }) {
           disabled={!voiceBlob || panelState === 'uploading'}
           onClick={() => handleClone()}
         >
-          ✨ Create Voice Clone
+          Create voice clone
         </button>
       </div>
 
@@ -151,7 +150,7 @@ export default function VoiceCloningPanel({ onVoiceCloned }) {
 
       {panelState === 'done' && (
         <div className="animate-fade-in" style={{ marginTop: 16, textAlign: 'center' }}>
-          <div style={{ fontSize: 42, color: 'var(--secondary)' }}>✓</div>
+          <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--secondary)' }}>Done</div>
           <div style={{ color: 'var(--primary)', fontWeight: 600, fontSize: 16 }}>Voice cloned successfully!</div>
           <div className="transcript-mono" style={{ color: 'var(--text-muted)', fontSize: 11, marginTop: 6 }}>
             Voice ID: {voiceId}
@@ -165,7 +164,7 @@ export default function VoiceCloningPanel({ onVoiceCloned }) {
               setVoiceBlob(null)
             }}
           >
-            🔄 Re-clone
+            Re-clone
           </button>
         </div>
       )}

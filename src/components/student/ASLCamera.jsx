@@ -193,9 +193,12 @@ export default function ASLCamera({ onSpelledWord, active, sessionState = 'idle'
           padding: '14px 16px 16px',
           borderTop: '1px solid var(--border)',
           background: 'var(--surface-raised)',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 12,
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button
             type="button"
             className={sessionActive ? 'btn-danger' : 'btn-primary'}
@@ -227,7 +230,7 @@ export default function ASLCamera({ onSpelledWord, active, sessionState = 'idle'
           </span>
         </div>
 
-        <div style={{ marginBottom: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <div
             style={{
               fontSize: 32,
@@ -246,7 +249,7 @@ export default function ASLCamera({ onSpelledWord, active, sessionState = 'idle'
           </div>
         </div>
 
-        <p style={{ margin: '0 0 10px', fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+        <p style={{ margin: 0, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
           Hold each letter ~2s. After 4s with no hand, the recognized text is sent automatically.
         </p>
 
@@ -257,7 +260,7 @@ export default function ASLCamera({ onSpelledWord, active, sessionState = 'idle'
           aria-label="Recognized ASL letters"
           placeholder="Recognized letters appear here"
           value={spelledText}
-          style={{ fontSize: 16, lineHeight: 1.5, minHeight: 92 }}
+          style={{ width: '100%', fontSize: 16, lineHeight: 1.5, minHeight: 110, resize: 'none' }}
         />
       </div>
     </div>

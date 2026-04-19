@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import ProfessorLectureControls from '../components/professor/ProfessorLectureControls'
 import ProfessorDocumentWorkspace from '../components/professor/ProfessorDocumentWorkspace'
@@ -20,15 +20,6 @@ export default function ProfessorPage() {
     pdfMimeType: 'application/pdf',
     pageCount: 0,
   })
-
-  const lectureStats = useMemo(() => {
-    const highlightedCount = annotationEvents.filter((event) => event.tool === 'highlighter').length
-    return {
-      annotationCount: annotationEvents.length,
-      highlightedCount,
-      penCount: annotationEvents.length - highlightedCount,
-    }
-  }, [annotationEvents])
 
   const getCurrentTimestampMs = useCallback(() => {
     if (!lectureStartedAtRef.current) return 0
@@ -219,8 +210,7 @@ export default function ProfessorPage() {
                 >
                   Professor
                 </div>
-                <h1 style={{ margin: '6px 0 0', fontSize: 22, fontWeight: 700, letterSpacing: '-0.03em' }}>Lecture Studio</h1>
-                <p style={{ margin: '6px 0 0', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
+                <p style={{ margin: '8px 0 0', fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.45 }}>
                   Start the session, upload your PDF, annotate while you speak, then stop to transcribe and publish.
                 </p>
               </div>
@@ -293,7 +283,6 @@ export default function ProfessorPage() {
                 processingError={processingError}
                 processingNotice={processingNotice}
                 runtimeStatus={runtimeStatus}
-                annotationCount={lectureStats.annotationCount}
               />
             </div>
           </section>
