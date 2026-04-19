@@ -5,7 +5,14 @@ import { buildLiveSystemInstruction } from '../utils/documentIndex'
 import { renderFirstPageJpegBase64 } from '../utils/pdfUtils'
 import { getApiBaseUrl } from '../utils/apiUrl'
 
-function buildSeedTurns({ extractedTextForSeed, numPages, weakText, jpeg }) {
+function formatTimestampSeconds(ms = 0) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function buildSeedTurns({ extractedTextForSeed, numPages, weakText, jpeg, lectureMemory = [] }) {
   const parts = []
   if (weakText && jpeg) {
     parts.push(
@@ -19,7 +26,25 @@ function buildSeedTurns({ extractedTextForSeed, numPages, weakText, jpeg }) {
     })
   }
 
+  if (lectureMemory.length) {
+    const compact = lectureMemory.slice(0, 20).map((entry) => ({
+      timestamp: formatTimestampSeconds(entry.timestamp),
+      page: entry.page,
+      summary: entry.summary,
+      transcript: typeof entry.transcript === 'string' ? entry.transcript.slice(0, 280) : '',
+    }))
+    parts.push({
+      text:
+        '[Lecture memory seed — what the professor emphasized at each annotated moment, in order]\n\n' +
+        JSON.stringify(compact, null, 2),
+    })
+  }
+
   if (!parts.length) return []
+
+  const ack = lectureMemory.length
+    ? 'Understood. I have the course document and the professor\'s lecture memory. I will answer naturally, ground my answers in the lecture and the document, and reference pages when helpful.'
+    : 'Understood. I will answer naturally, stay grounded in the course document, and reference pages when helpful.'
 
   return [
     {
@@ -28,11 +53,7 @@ function buildSeedTurns({ extractedTextForSeed, numPages, weakText, jpeg }) {
     },
     {
       role: 'model',
-      parts: [
-        {
-          text: 'Understood. I will answer naturally, stay grounded in the course document, and reference pages when helpful.',
-        },
-      ],
+      parts: [{ text: ack }],
     },
   ]
 }
@@ -71,8 +92,17 @@ function getLiveWsUrl() {
  * @param {object} options
  * @param {object | null} options.documentIndex
  * @param {() => Promise<object | null> | object | null} [options.getPdfDocument]
+ * @param {Array<object>} [options.lectureMemory]    structured lecture memory built by Gemma
+ * @param {Array<object>} [options.annotationEvents] raw professor strokes (with ids + bounds)
  */
-export default function useGeminiLiveDocument({ documentIndex, getPdfDocument }) {
+export default function useGeminiLiveDocument({
+  documentIndex,
+  getPdfDocument,
+  lectureMemory = [],
+  annotationEvents = [],
+  lectureGroundingVersion = 0,
+  runtimeStatus = null,
+}) {
   const [status, setStatus] = useState('idle')
   const [error, setError] = useState('')
   const [heardText, setHeardText] = useState('')
@@ -95,6 +125,9 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
   const connectionIdRef = useRef(0)
   const sessionStartedAtRef = useRef(Date.now())
   const audioPlaybackEnabledRef = useRef(true)
+  const activeGroundingVersionRef = useRef(0)
+  const isRefreshingSessionRef = useRef(false)
+  const reconnectReasonRef = useRef('')
 
   useEffect(() => {
     playerRef.current = new PcmChunkPlayer(24000)
@@ -235,7 +268,10 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
   )
 
   const buildSessionPayload = useCallback(async () => {
-    const systemInstruction = buildLiveSystemInstruction(documentIndex)
+    const systemInstruction = buildLiveSystemInstruction(documentIndex, {
+      lectureMemory,
+      annotationEvents,
+    })
     let jpeg = ''
 
     if (documentIndex?.weakText && getPdfDocument) {
@@ -252,9 +288,10 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
         numPages: documentIndex?.numPages,
         weakText: documentIndex?.weakText,
         jpeg,
+        lectureMemory,
       }),
     }
-  }, [documentIndex, getPdfDocument])
+  }, [annotationEvents, documentIndex, getPdfDocument, lectureMemory])
 
   const startLive = useCallback(async () => {
     if (!documentIndex) {
@@ -274,15 +311,16 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
     try {
       const sessionPayload = await buildSessionPayload()
 
-      if (sessionRef.current) {
-        expectedCloseRef.current = true
-        sessionRef.current.close?.()
-        sessionRef.current = null
-        expectedCloseRef.current = false
-      }
-
       const connectionId = connectionIdRef.current + 1
       connectionIdRef.current = connectionId
+      const previousSession = sessionRef.current
+      if (previousSession) {
+        try {
+          previousSession.close(1000, 'Refreshing session')
+        } catch {
+          // best effort
+        }
+      }
       const ws = new WebSocket(getLiveWsUrl())
 
       ws.onopen = () => {
@@ -309,7 +347,7 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
 
       ws.onerror = () => {
         if (connectionId !== connectionIdRef.current) return
-        setError('Live proxy connection error.')
+        setError(reconnectReasonRef.current || 'Live proxy connection error.')
         setStatus('error')
         setLastEvent('error')
       }
@@ -326,15 +364,19 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
           return
         }
         const reason = event?.reason?.trim()
-        const details = reason
-          ? `Live session closed: ${reason}`
-          : `Live session closed unexpectedly${event?.code ? ` (code ${event.code})` : ''}.`
+        const details =
+          reconnectReasonRef.current ||
+          (reason
+            ? `Live session closed: ${reason}`
+            : `Live session closed unexpectedly${event?.code ? ` (code ${event.code})` : ''}.`)
         setError(details)
         setStatus('error')
         setLastEvent('error')
       }
 
       sessionRef.current = ws
+      activeGroundingVersionRef.current = lectureGroundingVersion
+      reconnectReasonRef.current = ''
       return true
     } catch (connectError) {
       console.error(connectError)
@@ -343,7 +385,7 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
       setLastEvent('error')
       return false
     }
-  }, [buildSessionPayload, clearAssistantPlayback, documentIndex, handleProxyMessage, preparePlayback, resetConversationState])
+  }, [buildSessionPayload, clearAssistantPlayback, documentIndex, handleProxyMessage, lectureGroundingVersion, preparePlayback, resetConversationState])
 
   const sendAudioStreamEnd = useCallback(() => {
     if (!sessionRef.current || status !== 'live' || sessionRef.current.readyState !== WebSocket.OPEN) return
@@ -409,6 +451,70 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
     await preparePlayback()
   }, [preparePlayback])
 
+  const buildAnnotationPreamble = useCallback(
+    (annotationId) => {
+      const stroke = annotationEvents.find((event) => event.id === annotationId)
+      if (!stroke) return ''
+      const memory = lectureMemory.find(
+        (entry) =>
+          Number(entry.page) === Number(stroke.page) &&
+          Math.abs((entry.timestamp ?? 0) - (stroke.startedAtMs ?? 0)) < 8000,
+      )
+      const verb = stroke.tool === 'highlighter' ? 'highlighted' : 'drew on'
+      const nearby = Array.isArray(stroke.nearbyText) ? stroke.nearbyText.slice(0, 6).join(' ') : ''
+      const transcriptExcerpt = memory?.transcript ? memory.transcript.slice(0, 400) : ''
+      const summary = memory?.summary ? ` Summary: ${memory.summary}` : ''
+      const said = transcriptExcerpt ? ` Around that moment they said: "${transcriptExcerpt}".` : ''
+      const region = nearby ? `"${nearby.slice(0, 160)}"` : 'a page region'
+      return `[annotation:${annotationId}] On page ${stroke.page} the professor ${verb} ${region}.${said}${summary}`
+    },
+    [annotationEvents, lectureMemory],
+  )
+
+  /**
+   * Click an annotation → ground the next turn in that stroke and ask Gemini Live
+   * about it as a typed user turn (works whether or not the mic is open).
+   */
+  const askAboutAnnotation = useCallback(
+    (annotationId, customQuestion = '') => {
+      const preamble = buildAnnotationPreamble(annotationId)
+      if (!preamble) return
+      const question = customQuestion?.trim() || `Why did the professor ${preamble.includes('highlighted') ? 'highlight this' : 'draw this'}? Explain what they meant by it.`
+      sendText(`${preamble} The student is asking: ${question}`)
+    },
+    [buildAnnotationPreamble, sendText],
+  )
+
+  /**
+   * Click an annotation → silently seed the grounding context so the student can
+   * then speak naturally about it. Sends a short user turn that primes the model
+   * to expect a follow-up question about this stroke.
+   */
+  const askAboutAnnotationWithVoice = useCallback(
+    (annotationId) => {
+      const preamble = buildAnnotationPreamble(annotationId)
+      if (!preamble) return
+      sendText(`${preamble} I'm about to ask you a question about this annotation by voice.`)
+    },
+    [buildAnnotationPreamble, sendText],
+  )
+
+  useEffect(() => {
+    if (status !== 'live') return
+    if (!lectureGroundingVersion || lectureGroundingVersion === activeGroundingVersionRef.current) return
+    if (isRefreshingSessionRef.current) return
+    if (runtimeStatus?.lectureMemoryMode === 'pending') return
+
+    isRefreshingSessionRef.current = true
+    setLastEvent('context_refresh')
+    setError('')
+    reconnectReasonRef.current = 'Refreshing live session with the latest lecture context...'
+
+    void startLive().finally(() => {
+      isRefreshingSessionRef.current = false
+    })
+  }, [lectureGroundingVersion, runtimeStatus?.lectureMemoryMode, startLive, status])
+
   return {
     status,
     error,
@@ -431,6 +537,9 @@ export default function useGeminiLiveDocument({ documentIndex, getPdfDocument })
     clearPlayback: clearAssistantPlayback,
     pauseAssistantAudio,
     resumeAssistantAudio,
-    hasLiveBackend: true,
+    askAboutAnnotation,
+    askAboutAnnotationWithVoice,
+    runtimeStatus,
+    hasLiveBackend: runtimeStatus ? Boolean(runtimeStatus.geminiConfigured && runtimeStatus.elevenLabsConfigured) : true,
   }
 }

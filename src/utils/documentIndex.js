@@ -131,13 +131,67 @@ export function isWeakTextContent(pages) {
   return total < 120 || avg < 40
 }
 
-export function buildLiveSystemInstruction(documentIndex) {
+function formatTimestampSeconds(ms = 0) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000))
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function formatLectureMemorySection(lectureMemory = []) {
+  if (!lectureMemory.length) return '(none — student is asking about the raw document)'
+  return lectureMemory
+    .slice(0, 30)
+    .map((entry, index) => {
+      const t = formatTimestampSeconds(entry.timestamp)
+      const summary = (entry.summary || '').trim()
+      const transcript = (entry.transcript || '').trim().slice(0, 200)
+      return `${index + 1}. [${t}] page ${entry.page || '?'} — ${summary}${transcript ? ` (prof said: "${transcript}${transcript.length === 200 ? '…' : ''}")` : ''}`
+    })
+    .join('\n')
+}
+
+function formatAnnotationIndex(annotationEvents = [], lectureMemory = []) {
+  if (!annotationEvents.length) return '(no annotations from the lecture)'
+  const memoryById = new Map()
+  for (const entry of lectureMemory) {
+    const candidates = annotationEvents.filter((s) => Number(s.page) === Number(entry.page))
+    if (!candidates.length) continue
+    let best = candidates[0]
+    let bestDelta = Math.abs((best.startedAtMs ?? 0) - (entry.timestamp ?? 0))
+    for (const stroke of candidates.slice(1)) {
+      const delta = Math.abs((stroke.startedAtMs ?? 0) - (entry.timestamp ?? 0))
+      if (delta < bestDelta) {
+        best = stroke
+        bestDelta = delta
+      }
+    }
+    if (best?.id) memoryById.set(best.id, entry)
+  }
+
+  return annotationEvents
+    .slice(0, 50)
+    .map((stroke) => {
+      const memory = memoryById.get(stroke.id)
+      const nearby = Array.isArray(stroke.nearbyText) ? stroke.nearbyText.slice(0, 4).join(' ') : ''
+      const verb = stroke.tool === 'highlighter' ? 'highlighted' : 'drew on'
+      const t = formatTimestampSeconds(stroke.startedAtMs)
+      const summary = memory?.summary ? ` — ${memory.summary}` : ''
+      return `- [annotation:${stroke.id}] page ${stroke.page} @ ${t}: ${verb} "${(nearby || stroke.annotationLabel || '').slice(0, 140)}"${summary}`
+    })
+    .join('\n')
+}
+
+export function buildLiveSystemInstruction(documentIndex, extras = {}) {
+  const { lectureMemory = [], annotationEvents = [] } = extras
   const headings = Object.entries(documentIndex.headingMap || {})
     .slice(0, 40)
     .map(([h, pg]) => `- "${h}" → page ${pg}`)
     .join('\n')
 
-  return `You are a course assistant helping a student understand ONE uploaded document.
+  const hasLecture = lectureMemory.length > 0 || annotationEvents.length > 0
+
+  return `You are a course assistant helping a student understand ONE uploaded document${hasLecture ? ' that the professor lectured on with timestamped annotations' : ''}.
 
 DOCUMENT MAP (compact outline — cite using page numbers exactly as below):
 ${documentIndex.documentMapTruncated}
@@ -145,10 +199,18 @@ ${documentIndex.documentMapTruncated}
 UNIQUE HEADINGS (when unambiguous):
 ${headings || '(none detected)'}
 
+LECTURE MEMORY (what the professor emphasized at each annotated moment — cite naturally, e.g. "around 2:14 the professor underlined ..."):
+${formatLectureMemorySection(lectureMemory)}
+
+ANNOTATION INDEX (each stroke the professor drew on the slides; reference by id when the user asks about a specific mark):
+${formatAnnotationIndex(annotationEvents, lectureMemory)}
+
 RULES:
-- Answer ONLY using this document and the seeded full text you receive. If something is not in the document, say so briefly.
+- Answer ONLY using this document, the lecture memory above, and the seeded full text you receive. If something is not in any of those, say so briefly.
 - Be conversational and concise for spoken replies (no markdown, no bullet lists in speech).
 - When you refer to a location, ALWAYS say the word "page" and the number, e.g. "page 3" or "pages 4 through 6". This helps the student's viewer scroll in sync.
+- When the user message starts with "[annotation:<id>]", that is the specific stroke they're asking about — ground your answer in that annotation's nearby text, the matching lecture-memory summary, and the surrounding transcript excerpt.
+- Prefer the professor's own words and emphasis from the lecture memory when relevant — speak as if you remember what they said.
 - Do not claim you "see" the PDF unless an image was provided for scanned pages; prefer textual evidence.
 - If quoting, keep quotes short.
 

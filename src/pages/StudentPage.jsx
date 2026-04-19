@@ -11,13 +11,14 @@ import { GeminiLiveDocumentProvider, useGeminiLiveDocumentContext } from '../con
 
 function StudentPageContent() {
   const live = useGeminiLiveDocumentContext()
-  const { sendAudioStreamEnd } = live
+  const { sendAudioStreamEnd, lectureMemory = [], annotationEvents = [] } = live
   const [inputMode, setInputMode] = useState('voice')
   const [isMicMuted, setIsMicMuted] = useState(false)
   const [isPaused, setIsPaused] = useState(false)
   const [audioLevel, setAudioLevel] = useState(0.2)
   const documentViewerRef = useRef(null)
   const sessionActive = live.status === 'live'
+  const hasLectureContext = lectureMemory.length > 0 || annotationEvents.length > 0
 
   const orbState = useMemo(() => {
     if (live.status !== 'live') return 'idle'
@@ -165,14 +166,64 @@ function StudentPageContent() {
 
         {(live.error || micStream.error) && <p style={{ color: 'var(--danger)', fontSize: 13, marginTop: 12 }}>{live.error || micStream.error}</p>}
         {live.status === 'connecting' && (
-          <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 12 }}>Connecting to live session...</p>
+          <p style={{ color: 'var(--text-secondary)', fontSize: 13, marginTop: 12 }}>
+            {live.lastEvent === 'context_refresh' ? 'Refreshing live session with the latest lecture context...' : 'Connecting to live session...'}
+          </p>
         )}
         {live.status === 'closing' && <p style={{ color: 'var(--text-muted)', fontSize: 13, marginTop: 12 }}>Closing live session...</p>}
         {!live.hasLiveBackend && (
           <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8 }}>
-            Set <code style={{ fontFamily: 'inherit' }}>GEMINI_API_KEY</code> and <code style={{ fontFamily: 'inherit' }}>ELEVENLABS_API_KEY</code> in <code style={{ fontFamily: 'inherit' }}>.env</code> so the backend live proxy can connect.
+            Set <code style={{ fontFamily: 'inherit' }}>GEMINI_API_KEY</code> and <code style={{ fontFamily: 'inherit' }}>ELEVENLABS_API_KEY</code> in <code style={{ fontFamily: 'inherit' }}>.env</code> so the backend live proxy can connect and speak back.
           </p>
         )}
+        {live.runtimeStatus?.lectureMemoryMode === 'pending' && (
+          <p style={{ color: 'var(--amber)', fontSize: 12, marginTop: 8 }}>
+            The annotated PDF is ready. Gemma 4 is still building lecture memory in the background, so annotation answers will get better once it finishes.
+          </p>
+        )}
+        {live.runtimeStatus?.lectureMemoryMode === 'error' && (
+          <p style={{ color: 'var(--amber)', fontSize: 12, marginTop: 8 }}>
+            Gemma 4 lecture memory is currently unavailable. The student can still ask about the document and annotations, but answers will stay document-grounded until Gemma 4 is healthy again.
+          </p>
+        )}
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap', justifyContent: 'center' }}>
+          <span
+            title={
+              hasLectureContext
+                ? `Grounded in ${lectureMemory.length} lecture memory ${lectureMemory.length === 1 ? 'entry' : 'entries'} and ${annotationEvents.length} professor annotations. Click any highlighted region in the slides to ask about it.`
+                : 'No lecture has been published yet — answers will be grounded in the raw document only.'
+            }
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 10px',
+              borderRadius: 999,
+              fontSize: 11,
+              fontWeight: 600,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              border: `1px solid ${hasLectureContext ? 'rgba(108,99,255,0.45)' : 'var(--border)'}`,
+              background: hasLectureContext ? 'rgba(108,99,255,0.12)' : 'rgba(255,255,255,0.04)',
+              color: hasLectureContext ? 'var(--primary)' : 'var(--text-muted)',
+            }}
+          >
+            <span
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: '50%',
+                background: hasLectureContext ? 'var(--primary)' : 'var(--text-muted)',
+              }}
+            />
+            {live.runtimeStatus?.lectureMemoryMode === 'pending'
+              ? `Gemma 4 pending · ${annotationEvents.length} annotations`
+              : hasLectureContext
+                ? `Lecture memory: ${lectureMemory.length} · ${annotationEvents.length} annotations`
+                : 'Document only (no lecture published)'}
+          </span>
+        </div>
 
         <CaptionsBar speaker={captionSpeaker} caption={(captionText || '').replace(/\[page:\d+\]\s*/i, '')} />
 

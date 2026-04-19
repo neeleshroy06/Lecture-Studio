@@ -1,90 +1,11 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { renderTextLayer } from 'pdfjs-dist/build/pdf'
 import 'pdfjs-dist/web/pdf_viewer.css'
 import { loadPdfFromBase64 } from '../../utils/pdfUtils'
 import { buildDocumentIndex } from '../../utils/documentIndex'
 import { TranscriptParser } from '../../utils/transcriptParser'
 import { useGeminiLiveDocumentContext } from '../../context/GeminiLiveDocumentContext'
 import { apiUrl } from '../../utils/apiUrl'
-
-function PageWithTextLayer({ pdfDocument, pageNum, scale }) {
-  const wrapRef = useRef(null)
-  const canvasRef = useRef(null)
-  const layerRef = useRef(null)
-
-  useEffect(() => {
-    if (!pdfDocument) return undefined
-    let cancelled = false
-
-    const run = async () => {
-      const page = await pdfDocument.getPage(pageNum)
-      const viewport = page.getViewport({ scale })
-      const canvas = canvasRef.current
-      const layer = layerRef.current
-      if (!canvas || !layer || cancelled) return
-
-      const context = canvas.getContext('2d')
-      canvas.width = viewport.width
-      canvas.height = viewport.height
-
-      await page.render({ canvasContext: context, viewport }).promise
-      if (cancelled) return
-
-      layer.innerHTML = ''
-      layer.style.setProperty('--scale-factor', String(viewport.scale))
-
-      const textContent = await page.getTextContent()
-      if (cancelled) return
-
-      const task = renderTextLayer({
-        textContentSource: textContent,
-        container: layer,
-        viewport,
-        textDivs: [],
-      })
-      await task.promise
-    }
-
-    run().catch((error) => {
-      console.error('Page render failed', pageNum, error)
-    })
-
-    return () => {
-      cancelled = true
-    }
-  }, [pdfDocument, pageNum, scale])
-
-  return (
-    <div
-      ref={wrapRef}
-      data-page-number={pageNum}
-      className="pdf-live-page"
-      style={{
-        position: 'relative',
-        border: '1px solid var(--border)',
-        borderRadius: 8,
-        overflow: 'hidden',
-        background: '#0f0f18',
-        marginBottom: 12,
-      }}
-    >
-      <canvas ref={canvasRef} style={{ display: 'block', width: '100%' }} />
-      <div
-        ref={layerRef}
-        className="textLayer"
-        style={{
-          position: 'absolute',
-          left: 0,
-          top: 0,
-          width: '100%',
-          height: '100%',
-          color: 'transparent',
-          lineHeight: 1,
-        }}
-      />
-    </div>
-  )
-}
+import AnnotatedPdfPage from './AnnotatedPdfPage'
 
 const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref) {
   const {
@@ -95,46 +16,159 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
     replyTurnId,
     userInputTurnId,
     documentIndex,
+    setLectureMemory,
+    setAnnotationEvents,
+    setLectureContextMeta,
+    askAboutAnnotation,
   } = useGeminiLiveDocumentContext()
 
   const [context, setContext] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [refreshing, setRefreshing] = useState(false)
   const [scale, setScale] = useState(1.25)
   const [pageCount, setPageCount] = useState(0)
   const [pdfDoc, setPdfDoc] = useState(null)
   const [currentPage, setCurrentPage] = useState(1)
-  const [activeChapter, setActiveChapter] = useState(0)
   const [geminiPageToast, setGeminiPageToast] = useState('')
 
   const containerRef = useRef(null)
   const parserRef = useRef(null)
   const actionChainRef = useRef(Promise.resolve())
   const replyTurnIdRef = useRef(0)
+  const mountedRef = useRef(true)
+  const requestInFlightRef = useRef(false)
 
   useEffect(() => {
     replyTurnIdRef.current = replyTurnId
   }, [replyTurnId])
 
-  useEffect(() => {
-    let mounted = true
-    const load = async () => {
+  const applyContextPayload = useCallback(
+    (data) => {
+      if (!mountedRef.current) return
+      setContext((current) => {
+        if (
+          current?.contextVersion === data?.contextVersion &&
+          current?.updatedAt === data?.updatedAt &&
+          current?.publishedAt === data?.publishedAt
+        ) {
+          return current
+        }
+        return data
+      })
+      setAnnotationEvents?.(Array.isArray(data?.annotationEvents) ? data.annotationEvents : [])
+      setLectureMemory?.(Array.isArray(data?.lectureMemory) ? data.lectureMemory : [])
+      setLectureContextMeta?.({
+        contextVersion: Number(data?.contextVersion) || 0,
+        liveGroundingVersion: Number(data?.liveGroundingVersion) || 0,
+        publishedAt: data?.publishedAt || null,
+        lectureStatus: data?.lectureStatus || 'idle',
+        runtimeStatus: data?.runtimeStatus || null,
+        updatedAt: data?.updatedAt || null,
+      })
+    },
+    [setAnnotationEvents, setLectureContextMeta, setLectureMemory],
+  )
+
+  const loadContext = useCallback(
+    async ({ background = false } = {}) => {
+      if (requestInFlightRef.current) return
+      requestInFlightRef.current = true
       try {
-        setLoading(true)
-        const response = await fetch(apiUrl('/api/context'))
+        if (!background) setLoading(true)
+        else setRefreshing(true)
+        const response = await fetch(apiUrl('/api/context'), { cache: 'no-store' })
+        if (!response.ok) {
+          throw new Error(`Unable to load course material (${response.status}).`)
+        }
         const data = await response.json()
-        if (mounted) setContext(data)
+        if (!mountedRef.current) return
+        setError('')
+        applyContextPayload(data)
       } catch (requestError) {
-        if (mounted) setError(requestError.message || 'Unable to load course material.')
+        if (!mountedRef.current) return
+        if (!background || !context) {
+          setError(requestError.message || 'Unable to load course material.')
+        }
       } finally {
-        if (mounted) setLoading(false)
+        requestInFlightRef.current = false
+        if (mountedRef.current && !background) setLoading(false)
+        if (mountedRef.current && background) setRefreshing(false)
+      }
+    },
+    [applyContextPayload, context],
+  )
+
+  useEffect(() => {
+    mountedRef.current = true
+    void loadContext()
+    return () => {
+      mountedRef.current = false
+    }
+  }, [loadContext])
+
+  useEffect(() => {
+    const refreshVisibleContext = () => {
+      if (document.visibilityState === 'visible') {
+        void loadContext({ background: true })
       }
     }
-    load()
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'visible') {
+        void loadContext({ background: true })
+      }
+    }, 4000)
+
+    window.addEventListener('focus', refreshVisibleContext)
+    document.addEventListener('visibilitychange', refreshVisibleContext)
+
     return () => {
-      mounted = false
+      window.clearInterval(intervalId)
+      window.removeEventListener('focus', refreshVisibleContext)
+      document.removeEventListener('visibilitychange', refreshVisibleContext)
     }
-  }, [])
+  }, [loadContext])
+
+  const annotationEvents = useMemo(
+    () => (Array.isArray(context?.annotationEvents) ? context.annotationEvents : []),
+    [context?.annotationEvents],
+  )
+  const lectureMemory = useMemo(
+    () => (Array.isArray(context?.lectureMemory) ? context.lectureMemory : []),
+    [context?.lectureMemory],
+  )
+
+  const strokesByPage = useMemo(() => {
+    const map = new Map()
+    for (const stroke of annotationEvents) {
+      const page = Number(stroke.page) || 1
+      if (!map.has(page)) map.set(page, [])
+      map.get(page).push(stroke)
+    }
+    return map
+  }, [annotationEvents])
+
+  const memoryByAnnotationId = useMemo(() => {
+    const map = new Map()
+    if (!lectureMemory.length || !annotationEvents.length) return map
+    // Match each lecture-memory entry to the closest annotation by (page, timestamp).
+    for (const entry of lectureMemory) {
+      const candidates = annotationEvents.filter((stroke) => Number(stroke.page) === Number(entry.page))
+      if (!candidates.length) continue
+      let best = candidates[0]
+      let bestDelta = Math.abs((best.startedAtMs ?? 0) - (entry.timestamp ?? 0))
+      for (const stroke of candidates.slice(1)) {
+        const delta = Math.abs((stroke.startedAtMs ?? 0) - (entry.timestamp ?? 0))
+        if (delta < bestDelta) {
+          best = stroke
+          bestDelta = delta
+        }
+      }
+      if (best?.id) map.set(best.id, entry)
+    }
+    return map
+  }, [annotationEvents, lectureMemory])
 
   useEffect(() => {
     if (!context?.pdfBase64) return undefined
@@ -253,15 +287,6 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
     clearHighlights()
   }, [userInputTurnId, clearHighlights])
 
-  const chapters = context?.chapters || []
-  const chapterPages = useMemo(
-    () =>
-      chapters.length && pageCount
-        ? chapters.map((_chapter, index) => Math.max(1, Math.ceil(((index + 1) / chapters.length) * pageCount)))
-        : [],
-    [chapters, pageCount],
-  )
-
   useEffect(() => {
     const container = containerRef.current
     if (!container) return undefined
@@ -280,18 +305,11 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
         }
       })
       setCurrentPage(bestPage)
-      if (chapterPages.length) {
-        let bestChapter = 0
-        chapterPages.forEach((startPage, index) => {
-          if (bestPage >= startPage) bestChapter = index
-        })
-        setActiveChapter(bestChapter)
-      }
     }
 
     container.addEventListener('scroll', onScroll)
     return () => container.removeEventListener('scroll', onScroll)
-  }, [pageCount, chapterPages])
+  }, [pageCount])
 
   if (loading && !context) {
     return (
@@ -321,7 +339,14 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
       <div className="glass-card" style={{ height: '100%', display: 'grid', placeItems: 'center', padding: 24, textAlign: 'center' }}>
         <div>
           <div style={{ fontSize: 42, opacity: 0.7 }}>📄</div>
-          <p style={{ color: 'var(--text-muted)' }}>Waiting for professor to upload course materials...</p>
+          <p style={{ color: 'var(--text-muted)', marginBottom: 10 }}>
+            {context?.lectureStatus === 'published'
+              ? 'The lecture is marked as published, but no PDF package is available yet.'
+              : 'Waiting for the professor to publish the annotated lecture package...'}
+          </p>
+          <button type="button" className="btn-secondary" onClick={() => void loadContext()}>
+            Refresh now
+          </button>
         </div>
       </div>
     )
@@ -335,9 +360,9 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
           <div style={{ marginLeft: 'auto', color: 'var(--text-muted)', fontSize: 13 }}>
             Page {currentPage} of {pageCount || 1}
           </div>
-          {documentIndex && (
-            <span style={{ fontSize: 12, color: 'var(--text-secondary)' }}>Live index ready</span>
-          )}
+          <button type="button" className="btn-secondary" style={{ padding: '8px 12px', fontSize: 12 }} onClick={() => void loadContext({ background: true })}>
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             <button type="button" aria-label="Zoom out PDF" className="icon-button" onClick={() => setScale((value) => Math.max(0.8, value - 0.15))}>
               −
@@ -352,42 +377,24 @@ const TranscriptPdfViewer = forwardRef(function TranscriptPdfViewer(_props, ref)
         {geminiPageToast && (
           <div style={{ marginTop: 10, fontSize: 13, color: 'var(--primary)' }}>{geminiPageToast}</div>
         )}
-
-        {!!chapters.length && (
-          <div className="muted-scrollbar" style={{ display: 'flex', gap: 8, overflowX: 'auto', marginTop: 12 }}>
-            {chapters.map((chapter, index) => (
-              <button
-                key={`${chapter}-${index}`}
-                type="button"
-                aria-label={`Jump to chapter ${chapter}`}
-                onClick={() => {
-                  setActiveChapter(index)
-                  const target = chapterPages[index] || 1
-                  const el = containerRef.current?.querySelector(`[data-page-number="${target}"]`)
-                  el?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-                }}
-                style={{
-                  whiteSpace: 'nowrap',
-                  borderRadius: 999,
-                  border: '1px solid rgba(255,255,255,0.08)',
-                  background: activeChapter === index ? 'var(--primary)' : 'rgba(255,255,255,0.03)',
-                  color: activeChapter === index ? 'white' : 'var(--text-secondary)',
-                  padding: '8px 12px',
-                  cursor: 'pointer',
-                }}
-              >
-                {chapter}
-              </button>
-            ))}
-          </div>
-        )}
       </div>
 
       <div ref={containerRef} className="muted-scrollbar" style={{ flex: 1, overflow: 'auto', paddingRight: 6 }}>
         {pdfDoc &&
-          Array.from({ length: pageCount || 0 }, (_, index) => (
-            <PageWithTextLayer key={index} pdfDocument={pdfDoc} pageNum={index + 1} scale={scale} />
-          ))}
+          Array.from({ length: pageCount || 0 }, (_, index) => {
+            const pageNum = index + 1
+            return (
+              <AnnotatedPdfPage
+                key={pageNum}
+                pdfDocument={pdfDoc}
+                pageNum={pageNum}
+                scale={scale}
+                strokes={strokesByPage.get(pageNum) || []}
+                memoryByAnnotationId={memoryByAnnotationId}
+                onAnnotationClick={(annotationId) => askAboutAnnotation?.(annotationId)}
+              />
+            )
+          })}
       </div>
     </div>
   )

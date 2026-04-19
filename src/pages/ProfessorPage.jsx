@@ -1,13 +1,16 @@
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import ProfessorLectureControls from '../components/professor/ProfessorLectureControls'
 import ProfessorDocumentWorkspace from '../components/professor/ProfessorDocumentWorkspace'
+import { apiRequestUrl, getApiErrorMessage } from '../utils/apiClient'
 
 export default function ProfessorPage() {
   const lectureControlsRef = useRef(null)
   const lectureStartedAtRef = useRef(0)
   const [lectureStatus, setLectureStatus] = useState('idle')
   const [processingError, setProcessingError] = useState('')
+  const [processingNotice, setProcessingNotice] = useState('')
+  const [runtimeStatus, setRuntimeStatus] = useState(null)
   const [transcriptText, setTranscriptText] = useState('')
   const [transcriptSegments, setTranscriptSegments] = useState([])
   const [annotationEvents, setAnnotationEvents] = useState([])
@@ -48,46 +51,114 @@ export default function ProfessorPage() {
     setLectureMemory([])
     setAnnotationEvents([])
     setProcessingError('')
+    setProcessingNotice('')
+    setRuntimeStatus(null)
   }, [])
 
   const handleLectureStart = async () => {
     lectureStartedAtRef.current = performance.now()
     setLectureStatus('recording')
     setProcessingError('')
+    setProcessingNotice('')
     setTranscriptText('')
     setTranscriptSegments([])
     setLectureMemory([])
     setAnnotationEvents([])
+    setRuntimeStatus(null)
     try {
-      await axios.post('/api/clear-context')
+      const response = await axios.post(apiRequestUrl('/api/clear-context'))
+      setRuntimeStatus(response.data?.runtimeStatus || null)
     } catch {
       // non-fatal
     }
   }
 
+  useEffect(() => {
+    let cancelled = false
+    const loadHealth = async () => {
+      try {
+        const response = await axios.get(apiRequestUrl('/api/health'))
+        if (cancelled) return
+        const health = response.data || {}
+        if (!health?.ollama?.ready) {
+          setProcessingNotice(health.ollama?.message || 'Gemma 4 is not ready on the active backend yet.')
+        }
+      } catch {
+        // best-effort preflight
+      }
+    }
+    void loadHealth()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    if (lectureStatus !== 'published') return undefined
+    if (!runtimeStatus || (runtimeStatus.lectureMemoryMode !== 'pending' && runtimeStatus.chapterDetectionMode !== 'pending')) {
+      return undefined
+    }
+
+    let cancelled = false
+    const refresh = async () => {
+      try {
+        const response = await axios.get(apiRequestUrl('/api/context'))
+        if (cancelled) return
+        const data = response.data || {}
+        setLectureMemory(Array.isArray(data.lectureMemory) ? data.lectureMemory : [])
+        setRuntimeStatus(data.runtimeStatus || null)
+        if (data.runtimeStatus?.lectureMemoryMode === 'ready') {
+          setProcessingNotice('Gemma 4 lecture memory is ready for students.')
+        } else if (data.runtimeStatus?.lectureMemoryMode === 'error') {
+          setProcessingNotice(data.runtimeStatus.lectureMemoryError || 'Gemma 4 lecture memory is unavailable right now.')
+        } else if (data.runtimeStatus?.lectureMemoryMode === 'pending') {
+          setProcessingNotice('Published for students. Gemma 4 is still building lecture memory...')
+        }
+      } catch {
+        // best-effort background refresh
+      }
+    }
+
+    void refresh()
+    const intervalId = window.setInterval(() => {
+      void refresh()
+    }, 2500)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(intervalId)
+    }
+  }, [lectureStatus, runtimeStatus])
+
   const handleLectureProcessed = useCallback(
     async ({ transcript, transcriptSegments: nextSegments, durationMs }) => {
       setTranscriptText(transcript)
       setTranscriptSegments(nextSegments)
+      setProcessingError('')
+      setProcessingNotice('')
 
       if (!documentState.pdfBase64) {
         setLectureStatus('idle')
         setLectureMemory([])
-        setProcessingError(
-          'No PDF was uploaded during this lecture, so slides and lecture memory were not published. Upload a PDF next time before you stop, or start a new lecture.',
-        )
+        const message =
+          'No PDF was uploaded during this lecture, so slides and lecture memory were not published. Upload a PDF before you stop the next lecture.'
+        setProcessingError(message)
         try {
-          await axios.post('/api/set-context', { transcript })
+          await axios.post(apiRequestUrl('/api/set-context'), {
+            transcript,
+            transcriptSegments: nextSegments,
+            lectureStatus: 'idle',
+            publishedAt: null,
+          })
         } catch {
           // non-fatal
         }
-        return
+        return { ok: false, stage: 'publish', message }
       }
 
       setLectureStatus('processing')
-      setProcessingError('')
       try {
-        const response = await axios.post('/api/process-lecture', {
+        const response = await axios.post(apiRequestUrl('/api/process-lecture'), {
           transcript,
           transcriptSegments: nextSegments,
           annotationEvents,
@@ -99,9 +170,27 @@ export default function ProfessorPage() {
         })
         setLectureMemory(Array.isArray(response.data?.lectureMemory) ? response.data.lectureMemory : [])
         setLectureStatus(response.data?.status || 'published')
+        setRuntimeStatus(response.data?.runtimeStatus || null)
+        const warnings = Array.isArray(response.data?.warnings) ? response.data.warnings.filter(Boolean) : []
+        const nextNotice =
+          response.data?.runtimeStatus?.lectureMemoryMode === 'pending'
+            ? 'Published for students. Gemma 4 is still building lecture memory...'
+            : warnings.join(' ')
+        setProcessingNotice(nextNotice)
+        return {
+          ok: true,
+          status: response.data?.status || 'published',
+          publishedAt: response.data?.publishedAt || null,
+          warnings,
+        }
       } catch (error) {
-        setProcessingError(error.response?.data?.message || error.message || 'Lecture processing failed.')
+        const message = getApiErrorMessage(error, {
+          action: 'publish the lecture package',
+          fallback: 'Lecture processing failed.',
+        })
+        setProcessingError(message)
         setLectureStatus('idle')
+        return { ok: false, stage: 'publish', message }
       }
     },
     [annotationEvents, documentState.fileName, documentState.pageCount, documentState.pdfBase64, documentState.pdfMimeType],
@@ -245,6 +334,8 @@ export default function ProfessorPage() {
                 onLectureProcessed={handleLectureProcessed}
                 onNewLecture={handleNewLecture}
                 processingError={processingError}
+                processingNotice={processingNotice}
+                runtimeStatus={runtimeStatus}
                 lectureMemoryCount={lectureStats.memoryCount}
                 annotationCount={lectureStats.annotationCount}
               />
@@ -295,7 +386,11 @@ export default function ProfessorPage() {
                     lineHeight: 1.5,
                   }}
                 >
-                  Entries appear after you stop the lecture (with a PDF uploaded during recording).
+                  {runtimeStatus?.lectureMemoryMode === 'pending'
+                    ? 'Gemma 4 is still building lecture memory in the background.'
+                    : runtimeStatus?.lectureMemoryMode === 'error'
+                      ? runtimeStatus.lectureMemoryError || 'Gemma 4 lecture memory is unavailable right now.'
+                      : 'Entries appear after you stop the lecture (with a PDF uploaded during recording).'}
                 </div>
               )}
 

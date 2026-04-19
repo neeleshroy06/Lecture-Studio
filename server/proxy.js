@@ -6,6 +6,7 @@ import FormData from 'form-data'
 import fs from 'fs'
 import http from 'http'
 import path from 'path'
+import { execFile } from 'child_process'
 import { fileURLToPath } from 'url'
 import { WebSocketServer, WebSocket } from 'ws'
 
@@ -21,8 +22,12 @@ const upload = multer({ dest: uploadDir })
 const PORT = process.env.PORT || 3001
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY
+const OLLAMA_URL = (process.env.OLLAMA_URL || 'http://localhost:11434').replace(/\/+$/, '')
+const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'gemma3:4b'
+const SERVER_STARTED_AT = new Date().toISOString()
+const SERVER_PID = process.pid
 const GEMINI_LIVE_WS_URL =
-  `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`
+  `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${GEMINI_API_KEY}`
 
 fs.mkdirSync(uploadDir, { recursive: true })
 
@@ -45,6 +50,36 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '100mb' }))
 app.use(express.urlencoded({ extended: true, limit: '100mb' }))
 
+function createRuntimeStatus({
+  voiceId = process.env.ELEVENLABS_VOICE_ID || '',
+  lectureMemoryMode = 'idle',
+  lectureMemoryError = '',
+  chapterDetectionMode = 'idle',
+  chapterDetectionError = '',
+  postProcessState = 'idle',
+  warnings = [],
+} = {}) {
+  return {
+    elevenLabsConfigured: Boolean(ELEVENLABS_API_KEY?.trim()),
+    geminiConfigured: Boolean(GEMINI_API_KEY?.trim()),
+    ollamaConfigured: Boolean(OLLAMA_URL && OLLAMA_MODEL),
+    voiceConfigured: Boolean(String(voiceId || '').trim()),
+    liveTextReady: Boolean(GEMINI_API_KEY?.trim()),
+    liveVoiceReady: Boolean(GEMINI_API_KEY?.trim() && ELEVENLABS_API_KEY?.trim() && String(voiceId || '').trim()),
+    lecturePublishReady: Boolean(ELEVENLABS_API_KEY?.trim()),
+    ollamaUrl: OLLAMA_URL,
+    ollamaModel: OLLAMA_MODEL,
+    lectureMemoryMode,
+    lectureMemoryError,
+    chapterDetectionMode,
+    chapterDetectionError,
+    postProcessState,
+    serverStartedAt: SERVER_STARTED_AT,
+    serverPid: SERVER_PID,
+    warnings: [...new Set((Array.isArray(warnings) ? warnings : []).filter(Boolean).map(String))],
+  }
+}
+
 function createEmptySessionContext() {
   return {
     transcript: '',
@@ -61,10 +96,40 @@ function createEmptySessionContext() {
     lectureStatus: 'idle',
     documentName: '',
     publishedAt: null,
+    contextVersion: 0,
+    liveGroundingVersion: 0,
+    updatedAt: null,
+    runtimeStatus: createRuntimeStatus(),
   }
 }
 
 let sessionContext = createEmptySessionContext()
+let latestLectureJobToken = 0
+
+function refreshSessionMetadata({
+  lectureMemoryMode = sessionContext.runtimeStatus?.lectureMemoryMode || 'idle',
+  lectureMemoryError = sessionContext.runtimeStatus?.lectureMemoryError || '',
+  chapterDetectionMode = sessionContext.runtimeStatus?.chapterDetectionMode || 'idle',
+  chapterDetectionError = sessionContext.runtimeStatus?.chapterDetectionError || '',
+  postProcessState = sessionContext.runtimeStatus?.postProcessState || 'idle',
+  warnings = sessionContext.runtimeStatus?.warnings || [],
+  groundingChanged = false,
+} = {}) {
+  sessionContext.contextVersion = Math.max(0, Number(sessionContext.contextVersion) || 0) + 1
+  if (groundingChanged) {
+    sessionContext.liveGroundingVersion = Math.max(0, Number(sessionContext.liveGroundingVersion) || 0) + 1
+  }
+  sessionContext.updatedAt = new Date().toISOString()
+  sessionContext.runtimeStatus = createRuntimeStatus({
+    voiceId: sessionContext.voiceId,
+    lectureMemoryMode,
+    lectureMemoryError,
+    chapterDetectionMode,
+    chapterDetectionError,
+    postProcessState,
+    warnings,
+  })
+}
 
 function cleanupUpload(file) {
   if (file?.path) {
@@ -92,6 +157,193 @@ function messageFromUpstream(error) {
     return 'ElevenLabs rate limit reached. Wait a minute and try again.'
   }
   return error.message || 'Upstream request failed.'
+}
+
+/**
+ * Local Gemma via Ollama. Run `ollama serve` (auto-started by `ollama run ...`) and
+ * `ollama pull <OLLAMA_MODEL>` so the model is available. Returns the raw assistant
+ * text content. When `json: true`, asks Ollama to constrain output to valid JSON.
+ */
+async function callOllama(prompt, { json = false, system = '', temperature = 0.2 } = {}) {
+  const messages = []
+  if (system) messages.push({ role: 'system', content: system })
+  messages.push({ role: 'user', content: prompt })
+
+  const body = {
+    model: OLLAMA_MODEL,
+    messages,
+    stream: false,
+    options: { temperature },
+  }
+  if (json) body.format = 'json'
+
+  const response = await axios.post(`${OLLAMA_URL}/api/chat`, body, {
+    headers: { 'Content-Type': 'application/json' },
+    timeout: 120000,
+  })
+  return String(response.data?.message?.content || '').trim()
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms)
+  })
+}
+
+function execFileAsync(file, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    execFile(file, args, { windowsHide: true, ...options }, (error, stdout, stderr) => {
+      if (error) {
+        error.stdout = stdout
+        error.stderr = stderr
+        reject(error)
+        return
+      }
+      resolve({ stdout, stderr })
+    })
+  })
+}
+
+async function findListeningPidsOnPort(port) {
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync('cmd.exe', ['/c', 'netstat -ano -p tcp'])
+    return [...new Set(
+      stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => line.split(/\s+/))
+        .filter((parts) => parts.length >= 5)
+        .filter((parts) => parts[0].toUpperCase() === 'TCP')
+        .filter((parts) => parts[1].endsWith(`:${port}`))
+        .filter((parts) => parts[3]?.toUpperCase() === 'LISTENING')
+        .map((parts) => Number(parts[4]))
+        .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== SERVER_PID),
+    )]
+  }
+
+  try {
+    const { stdout } = await execFileAsync('sh', ['-lc', `lsof -ti tcp:${port}`])
+    return [...new Set(
+      stdout
+        .split(/\r?\n/)
+        .map((value) => Number(value.trim()))
+        .filter((pid) => Number.isInteger(pid) && pid > 0 && pid !== SERVER_PID),
+    )]
+  } catch (error) {
+    if (error.code === 1 && !String(error.stdout || '').trim()) {
+      return []
+    }
+    throw error
+  }
+}
+
+async function terminatePid(pid) {
+  if (!pid || pid === SERVER_PID) return
+  if (process.platform === 'win32') {
+    await execFileAsync('taskkill', ['/PID', String(pid), '/F'])
+    return
+  }
+  await execFileAsync('kill', ['-9', String(pid)])
+}
+
+async function freePort(port) {
+  const pids = await findListeningPidsOnPort(port)
+  if (!pids.length) return []
+  for (const pid of pids) {
+    await terminatePid(pid)
+  }
+  await sleep(350)
+  return pids
+}
+
+function listenOnce(serverInstance, port) {
+  return new Promise((resolve, reject) => {
+    const onListening = () => {
+      cleanup()
+      resolve()
+    }
+    const onError = (error) => {
+      cleanup()
+      reject(error)
+    }
+    const cleanup = () => {
+      serverInstance.off('listening', onListening)
+      serverInstance.off('error', onError)
+    }
+    serverInstance.once('listening', onListening)
+    serverInstance.once('error', onError)
+    serverInstance.listen(port)
+  })
+}
+
+async function startServerWithPortRecovery(serverInstance, port) {
+  try {
+    await listenOnce(serverInstance, port)
+    console.log(`Ed-Assist proxy running on http://localhost:${port}`)
+  } catch (error) {
+    if (error?.code !== 'EADDRINUSE') {
+      throw error
+    }
+
+    console.warn(`[Proxy] Port ${port} is already in use. Attempting to free it and retry.`)
+    const releasedPids = await freePort(port)
+    if (!releasedPids.length) {
+      throw error
+    }
+
+    console.log(`[Proxy] Freed port ${port} by stopping PID${releasedPids.length === 1 ? '' : 's'} ${releasedPids.join(', ')}.`)
+    await listenOnce(serverInstance, port)
+    console.log(`Ed-Assist proxy running on http://localhost:${port}`)
+  }
+}
+
+function normalizeModelName(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+}
+
+function modelMatches(candidate, target) {
+  const left = normalizeModelName(candidate)
+  const right = normalizeModelName(target)
+  return Boolean(left && right) && (left === right || left.startsWith(`${right}:`) || right.startsWith(`${left}:`))
+}
+
+async function checkOllamaHealth() {
+  if (!OLLAMA_URL || !OLLAMA_MODEL) {
+    return {
+      ok: false,
+      reachable: false,
+      modelAvailable: false,
+      message: 'OLLAMA_URL or OLLAMA_MODEL is not configured.',
+    }
+  }
+
+  try {
+    const response = await axios.get(`${OLLAMA_URL}/api/tags`, {
+      timeout: 5000,
+      headers: { 'Content-Type': 'application/json' },
+    })
+    const models = Array.isArray(response.data?.models) ? response.data.models : []
+    const modelAvailable = models.some((model) => modelMatches(model?.name, OLLAMA_MODEL))
+    return {
+      ok: modelAvailable,
+      reachable: true,
+      modelAvailable,
+      message: modelAvailable
+        ? ''
+        : `Ollama is reachable, but model "${OLLAMA_MODEL}" is not installed. Run "ollama pull ${OLLAMA_MODEL}".`,
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reachable: false,
+      modelAvailable: false,
+      message: `Ollama is not reachable at ${OLLAMA_URL}. Start the Ollama service and make sure "${OLLAMA_MODEL}" is installed.`,
+      details: error?.message || 'Unknown Ollama error.',
+    }
+  }
 }
 
 function getGemmaEndpoint() {
@@ -299,35 +551,21 @@ function attachTranscriptToMoments(moments = [], transcriptSegments = []) {
   })
 }
 
-function fallbackLectureMemory(moments = []) {
-  return moments.map((moment) => ({
-    timestamp: moment.timestamp,
-    transcript: moment.transcript || '',
-    annotation: moment.annotation,
-    page: moment.page,
-    summary: moment.transcript
-      ? `Professor likely emphasized ${moment.transcript.slice(0, 180)}`
-      : `Professor annotated page ${moment.page}.`,
-  }))
-}
-
 async function generateLectureMemoryWithGemma(moments = [], transcript = '') {
-  if (!moments.length) return []
-  if (!GEMINI_API_KEY?.trim()) {
-    return fallbackLectureMemory(moments)
+  if (!moments.length) {
+    return { entries: [], mode: 'idle', warning: '', error: '' }
   }
 
   const prompt = `You are converting a lecture transcript plus timestamped document annotations into structured lecture memory.
 
-Return a JSON array only. Each array item must have exactly these keys:
-- timestamp
-- transcript
-- annotation
-- page
-- summary
+Return ONLY a JSON object of the form { "entries": [ ... ] } where each entry has exactly these keys:
+- timestamp (integer, milliseconds from lecture start; copy from the input moment)
+- transcript (string, the words the professor was saying around that moment)
+- annotation (string, what the professor drew/highlighted)
+- page (integer, the page number)
+- summary (one sentence explaining what the professor was likely emphasizing at that moment)
 
-The summary should be 1 sentence explaining what the professor was likely emphasizing at that moment.
-Do not invent details beyond the transcript and annotation context.
+Do not invent details beyond the transcript and annotation context. Output one entry per input moment, in the same order.
 
 Lecture transcript:
 ${transcript.slice(0, 24000)}
@@ -345,34 +583,50 @@ ${JSON.stringify(
     2,
   )}`
 
-  try {
-    const response = await axios.post(
-      getGemmaEndpoint(),
-      {
-        contents: [
-          {
-            parts: [{ text: prompt }],
-          },
-        ],
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-      },
-    )
-    const parsed = parseJsonCandidate(extractTextCandidate(response.data), [])
-    if (!Array.isArray(parsed) || !parsed.length) {
-      return fallbackLectureMemory(moments)
+  let lastError = ''
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const raw = await callOllama(prompt, { json: true })
+      const parsed = parseJsonCandidate(raw, null)
+      const entries = Array.isArray(parsed)
+        ? parsed
+        : Array.isArray(parsed?.entries)
+          ? parsed.entries
+          : Array.isArray(parsed?.lectureMemory)
+            ? parsed.lectureMemory
+            : []
+
+      if (!entries.length) {
+        lastError = `Gemma 4 returned an empty or invalid lecture-memory payload on attempt ${attempt}.`
+      } else {
+        return {
+          entries: entries.map((entry, index) => ({
+            timestamp: Math.max(0, Math.round(normalizeNumberish(entry.timestamp, moments[index]?.timestamp || 0))),
+            transcript: String(entry.transcript || moments[index]?.transcript || '').trim(),
+            annotation: String(entry.annotation || moments[index]?.annotation || '').trim(),
+            page: Number(entry.page) || moments[index]?.page || 1,
+            summary: String(entry.summary || '').trim(),
+          })),
+          mode: 'ready',
+          warning: '',
+          error: '',
+        }
+      }
+    } catch (error) {
+      console.error('Lecture memory generation failed (Ollama):', error.response?.data || error.message)
+      lastError = error?.message || `Gemma 4 request failed on attempt ${attempt}.`
     }
-    return parsed.map((entry, index) => ({
-      timestamp: Math.max(0, Math.round(normalizeNumberish(entry.timestamp, moments[index]?.timestamp || 0))),
-      transcript: String(entry.transcript || moments[index]?.transcript || '').trim(),
-      annotation: String(entry.annotation || moments[index]?.annotation || '').trim(),
-      page: Number(entry.page) || moments[index]?.page || 1,
-      summary: String(entry.summary || '').trim() || fallbackLectureMemory([moments[index]])[0].summary,
-    }))
-  } catch (error) {
-    console.error('Lecture memory generation failed:', error.response?.data || error.message)
-    return fallbackLectureMemory(moments)
+
+    if (attempt < 3) {
+      await sleep(attempt * 1200)
+    }
+  }
+
+  return {
+    entries: [],
+    mode: 'error',
+    warning: `Gemma 4 could not build lecture memory for this lecture. Current model: ${OLLAMA_MODEL}.`,
+    error: lastError || 'Gemma 4 did not return a usable lecture-memory response.',
   }
 }
 
@@ -392,37 +646,46 @@ function parseChapterArray(raw) {
 }
 
 async function detectChaptersAsync(transcript) {
-  if (!transcript?.trim() || !GEMINI_API_KEY) {
-    sessionContext.chapters = []
-    return
+  if (!transcript?.trim()) {
+    return { chapters: [], mode: 'idle', warning: '', error: '' }
   }
 
   try {
-    const response = await axios.post(
-      getGemmaEndpoint(),
-      {
-        contents: [
-          {
-            parts: [
-              {
-                text: `Analyze this lecture transcript and return a JSON array of 4 to 8 concise chapter or topic names only. Do not include markdown, explanations, or extra text.
+    const raw = await callOllama(
+      `Analyze this lecture transcript and return ONLY a JSON object of the form { "chapters": [ "name 1", "name 2", ... ] } with 4 to 8 concise chapter or topic names. No markdown, no extra text.
 
 Transcript:
 ${transcript.slice(0, 50000)}`,
-              },
-            ],
-          },
-        ],
-      },
-      {
-        headers: { 'Content-Type': 'application/json' },
-      },
+      { json: true },
     )
 
-    sessionContext.chapters = parseChapterArray(extractTextCandidate(response.data))
+    const parsed = parseJsonCandidate(raw, null)
+    const chapters = Array.isArray(parsed)
+      ? parsed
+      : Array.isArray(parsed?.chapters)
+        ? parsed.chapters
+        : Array.isArray(parsed?.topics)
+          ? parsed.topics
+          : []
+
+    let nextChapters = chapters.filter(Boolean).map(String).slice(0, 8)
+    if (!nextChapters.length) {
+      nextChapters = parseChapterArray(raw)
+    }
+    return {
+      chapters: nextChapters,
+      mode: 'ready',
+      warning: '',
+      error: '',
+    }
   } catch (error) {
-    console.error('Chapter detection failed:', error.response?.data || error.message)
-    sessionContext.chapters = []
+    console.error('Chapter detection failed (Ollama):', error.response?.data || error.message)
+    return {
+      chapters: [],
+      mode: 'error',
+      warning: `Ollama was unavailable while detecting lecture chapters, so the chapter list was left empty. Current model: ${OLLAMA_MODEL}.`,
+      error: error?.message || 'Gemma 4 chapter detection failed.',
+    }
   }
 }
 
@@ -476,6 +739,62 @@ ${compactSection('Handwritten notes', sessionContext.handwrittenNotesText, '(non
 ${compactSection('Lecture memory', formatLectureMemoryForPrompt(sessionContext.lectureMemory), '(none)', 6000)}`
 }
 
+async function scheduleLecturePostProcessing({ transcript, transcriptSegments, annotationEvents, jobToken }) {
+  const annotationMoments = attachTranscriptToMoments(groupAnnotationEvents(annotationEvents), transcriptSegments)
+  const ollamaStatus = await checkOllamaHealth()
+
+  if (jobToken !== latestLectureJobToken) return
+
+  if (!ollamaStatus.ok) {
+    sessionContext.lectureMemory = []
+    sessionContext.chapters = []
+    refreshSessionMetadata({
+      lectureMemoryMode: annotationMoments.length ? 'error' : 'idle',
+      lectureMemoryError: annotationMoments.length ? ollamaStatus.message : '',
+      chapterDetectionMode: transcript ? 'error' : 'idle',
+      chapterDetectionError: transcript ? ollamaStatus.message : '',
+      postProcessState: 'idle',
+      warnings: [ollamaStatus.message],
+    })
+    return
+  }
+
+  refreshSessionMetadata({
+    lectureMemoryMode: annotationMoments.length ? 'pending' : 'idle',
+    lectureMemoryError: '',
+    chapterDetectionMode: transcript ? 'pending' : 'idle',
+    chapterDetectionError: '',
+    postProcessState: 'running',
+    warnings: [],
+  })
+
+  const [lectureMemoryResult, chapterResult] = await Promise.all([
+    annotationMoments.length ? generateLectureMemoryWithGemma(annotationMoments, transcript) : Promise.resolve({ entries: [], mode: 'idle', warning: '', error: '' }),
+    transcript ? detectChaptersAsync(transcript) : Promise.resolve({ chapters: [], mode: 'idle', warning: '', error: '' }),
+  ])
+
+  if (jobToken !== latestLectureJobToken) return
+
+  sessionContext.lectureMemory = Array.isArray(lectureMemoryResult.entries) ? lectureMemoryResult.entries : []
+  sessionContext.chapters = Array.isArray(chapterResult.chapters) ? chapterResult.chapters : []
+
+  const warnings = [lectureMemoryResult.warning, chapterResult.warning].filter(Boolean)
+  refreshSessionMetadata({
+    lectureMemoryMode: lectureMemoryResult.mode,
+    lectureMemoryError: lectureMemoryResult.error || '',
+    chapterDetectionMode: chapterResult.mode,
+    chapterDetectionError: chapterResult.error || '',
+    postProcessState:
+      lectureMemoryResult.mode === 'pending' || chapterResult.mode === 'pending'
+        ? 'running'
+        : lectureMemoryResult.mode === 'error' || chapterResult.mode === 'error'
+          ? 'completed_with_issues'
+          : 'idle',
+    warnings,
+    groundingChanged: sessionContext.lectureMemory.length > 0,
+  })
+}
+
 app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: 'Audio file is required.' })
@@ -520,6 +839,9 @@ app.post('/api/transcribe', upload.single('audio'), async (req, res) => {
   }
 })
 
+// TODO: migrate this to local Ollama once we standardize on a multimodal Gemma build
+// (e.g. gemma3:4b is multimodal, but gemma4:e4b may not be on every install). For now we
+// keep the cloud Gemma vision call so handwritten-notes OCR keeps working out of the box.
 app.post('/api/ocr-notes', upload.single('image'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: 'Image file is required.' })
@@ -590,7 +912,8 @@ app.post('/api/clone-voice', upload.single('audio'), async (req, res) => {
     })
 
     sessionContext.voiceId = response.data?.voice_id || ''
-    res.json({ voiceId: sessionContext.voiceId })
+    refreshSessionMetadata()
+    res.json({ voiceId: sessionContext.voiceId, runtimeStatus: sessionContext.runtimeStatus, contextVersion: sessionContext.contextVersion })
   } catch (error) {
     console.error('Voice clone error:', error.response?.data || error.message)
     const message = messageFromUpstream(error)
@@ -626,9 +949,6 @@ app.post('/api/process-lecture', async (req, res) => {
   }
 
   try {
-    const annotationMoments = attachTranscriptToMoments(groupAnnotationEvents(annotationEvents), transcriptSegments)
-    const lectureMemory = await generateLectureMemoryWithGemma(annotationMoments, transcript)
-
     sessionContext.transcript = transcript
     sessionContext.transcriptSegments = transcriptSegments
     sessionContext.pdfBase64 = pdfBase64
@@ -640,19 +960,39 @@ app.post('/api/process-lecture', async (req, res) => {
       sourcePdfMimeType: pdfMimeType,
       annotationCount: annotationEvents.length,
     }
-    sessionContext.lectureMemory = lectureMemory
+    sessionContext.lectureMemory = []
+    sessionContext.chapters = []
     sessionContext.lectureStatus = 'published'
     sessionContext.documentName = documentName
     sessionContext.publishedAt = new Date().toISOString()
+    latestLectureJobToken += 1
+    const jobToken = latestLectureJobToken
+    refreshSessionMetadata({
+      lectureMemoryMode: annotationEvents.length ? 'pending' : 'idle',
+      lectureMemoryError: '',
+      chapterDetectionMode: transcript ? 'pending' : 'idle',
+      chapterDetectionError: '',
+      postProcessState: 'running',
+      warnings: ['Published for students. Gemma 4 is building lecture memory in the background.'],
+      groundingChanged: true,
+    })
 
-    await detectChaptersAsync(transcript)
+    void scheduleLecturePostProcessing({
+      transcript,
+      transcriptSegments,
+      annotationEvents,
+      jobToken,
+    })
 
     res.json({
       ok: true,
       status: sessionContext.lectureStatus,
-      lectureMemory,
-      annotationMoments,
+      lectureMemory: sessionContext.lectureMemory,
       publishedAt: sessionContext.publishedAt,
+      contextVersion: sessionContext.contextVersion,
+      liveGroundingVersion: sessionContext.liveGroundingVersion,
+      runtimeStatus: sessionContext.runtimeStatus,
+      warnings: sessionContext.runtimeStatus.warnings,
     })
   } catch (error) {
     console.error('Process lecture error:', error.response?.data || error.message)
@@ -705,17 +1045,46 @@ app.post('/api/set-context', async (req, res) => {
   if (Object.prototype.hasOwnProperty.call(body, 'publishedAt')) {
     sessionContext.publishedAt = body.publishedAt || null
   }
-
-  if (sessionContext.transcript && sessionContext.transcript !== previousTranscript) {
-    await detectChaptersAsync(sessionContext.transcript)
+  if (Object.prototype.hasOwnProperty.call(body, 'runtimeStatus')) {
+    sessionContext.runtimeStatus =
+      body.runtimeStatus && typeof body.runtimeStatus === 'object'
+        ? {
+            ...createRuntimeStatus({ voiceId: sessionContext.voiceId }),
+            ...body.runtimeStatus,
+          }
+        : createRuntimeStatus({ voiceId: sessionContext.voiceId })
   }
 
-  res.json({ ok: true })
+  let chapterResult = {
+    mode: sessionContext.runtimeStatus?.chapterDetectionMode || 'idle',
+    warning: '',
+    error: '',
+    chapters: sessionContext.chapters,
+  }
+  if (sessionContext.transcript && sessionContext.transcript !== previousTranscript) {
+    chapterResult = await detectChaptersAsync(sessionContext.transcript)
+    sessionContext.chapters = chapterResult.chapters
+  }
+
+  const warningSet = new Set(sessionContext.runtimeStatus?.warnings || [])
+  if (chapterResult.warning) warningSet.add(chapterResult.warning)
+  refreshSessionMetadata({
+    lectureMemoryMode: sessionContext.runtimeStatus?.lectureMemoryMode || 'idle',
+    lectureMemoryError: sessionContext.runtimeStatus?.lectureMemoryError || '',
+    chapterDetectionMode: chapterResult.mode,
+    chapterDetectionError: chapterResult.error || '',
+    postProcessState: sessionContext.runtimeStatus?.postProcessState || 'idle',
+    warnings: [...warningSet],
+  })
+
+  res.json({ ok: true, contextVersion: sessionContext.contextVersion, runtimeStatus: sessionContext.runtimeStatus })
 })
 
 app.post('/api/clear-context', (_req, res) => {
   sessionContext = createEmptySessionContext()
-  res.json({ ok: true })
+  latestLectureJobToken += 1
+  refreshSessionMetadata({ groundingChanged: true })
+  res.json({ ok: true, contextVersion: sessionContext.contextVersion, runtimeStatus: sessionContext.runtimeStatus })
 })
 
 app.get('/api/context', (_req, res) => {
@@ -734,6 +1103,31 @@ app.get('/api/context', (_req, res) => {
     lectureStatus: sessionContext.lectureStatus,
     documentName: sessionContext.documentName,
     publishedAt: sessionContext.publishedAt,
+    contextVersion: sessionContext.contextVersion,
+    liveGroundingVersion: sessionContext.liveGroundingVersion,
+    updatedAt: sessionContext.updatedAt,
+    runtimeStatus: sessionContext.runtimeStatus,
+  })
+})
+
+app.get('/api/health', async (_req, res) => {
+  const ollamaHealth = await checkOllamaHealth()
+  res.json({
+    ok: true,
+    port: PORT,
+    serverPid: SERVER_PID,
+    serverStartedAt: SERVER_STARTED_AT,
+    geminiConfigured: Boolean(GEMINI_API_KEY?.trim()),
+    elevenLabsConfigured: Boolean(ELEVENLABS_API_KEY?.trim()),
+    ollama: {
+      url: OLLAMA_URL,
+      model: OLLAMA_MODEL,
+      reachable: ollamaHealth.reachable,
+      modelAvailable: ollamaHealth.modelAvailable,
+      ready: ollamaHealth.ok,
+      message: ollamaHealth.message || '',
+    },
+    lectureRuntime: sessionContext.runtimeStatus,
   })
 })
 
@@ -790,9 +1184,186 @@ app.post('/api/gemini-live/token', async (req, res) => {
 })
 
 const server = http.createServer(app)
-const liveWss = new WebSocketServer({ server, path: '/api/live' })
+const liveWss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+liveWss.on('error', (error) => {
+  if (error?.code !== 'EADDRINUSE') {
+    console.error('[Live WS] Server error:', error.message)
+  }
+})
+
+/**
+ * Build a minimal RIFF/WAVE header for 16-bit PCM mono and prepend it to the raw
+ * little-endian samples. ElevenLabs Scribe REST accepts this directly.
+ */
+function pcm16ToWavBuffer(pcmBuffer, sampleRate = 16000) {
+  const dataSize = pcmBuffer.length
+  const header = Buffer.alloc(44)
+  header.write('RIFF', 0)
+  header.writeUInt32LE(36 + dataSize, 4)
+  header.write('WAVE', 8)
+  header.write('fmt ', 12)
+  header.writeUInt32LE(16, 16) // fmt chunk size
+  header.writeUInt16LE(1, 20) // PCM format
+  header.writeUInt16LE(1, 22) // channels
+  header.writeUInt32LE(sampleRate, 24)
+  header.writeUInt32LE(sampleRate * 2, 28) // byte rate
+  header.writeUInt16LE(2, 32) // block align
+  header.writeUInt16LE(16, 34) // bits per sample
+  header.write('data', 36)
+  header.writeUInt32LE(dataSize, 40)
+  return Buffer.concat([header, pcmBuffer])
+}
+
+/**
+ * Lightweight live-captions WebSocket. The browser pushes 16 kHz mono int16 PCM
+ * (base64-encoded). We buffer ~3 seconds and POST it to ElevenLabs Scribe REST,
+ * then stream the resulting text back as a partial caption. This is purely a UX
+ * layer — the authoritative transcript still comes from the final batch upload
+ * to /api/transcribe when the professor stops.
+ */
+const sttWss = new WebSocketServer({ noServer: true, perMessageDeflate: false })
+sttWss.on('error', (error) => {
+  if (error?.code !== 'EADDRINUSE') {
+    console.error('[STT-Stream] Server error:', error.message)
+  }
+})
+
+server.on('upgrade', (request, socket, head) => {
+  const requestUrl = request.url || '/'
+  const pathname = new URL(requestUrl, 'http://localhost').pathname
+  const rejectUpgrade = () => {
+    socket.write('HTTP/1.1 404 Not Found\r\n\r\n')
+    socket.destroy()
+  }
+
+  if (pathname === '/api/live') {
+    liveWss.handleUpgrade(request, socket, head, (ws) => {
+      liveWss.emit('connection', ws, request)
+    })
+    return
+  }
+
+  if (pathname === '/api/stt-stream') {
+    sttWss.handleUpgrade(request, socket, head, (ws) => {
+      sttWss.emit('connection', ws, request)
+    })
+    return
+  }
+
+  rejectUpgrade()
+})
+
+sttWss.on('connection', (browserWs) => {
+  let pcmChunks = []
+  let pcmBytes = 0
+  let flushing = false
+  let flushTimer = null
+  let closed = false
+  // 16 kHz * 2 bytes/sample * 3 seconds ≈ 96 KB
+  const FLUSH_BYTES = 16000 * 2 * 3
+  const FLUSH_MS = 3500
+
+  function safeSendCaption(payload) {
+    if (browserWs.readyState !== WebSocket.OPEN) return
+    browserWs.send(JSON.stringify(payload))
+  }
+
+  async function flush() {
+    if (flushing || closed || !pcmChunks.length) return
+    if (!ELEVENLABS_API_KEY?.trim()) {
+      pcmChunks = []
+      pcmBytes = 0
+      safeSendCaption({ type: 'error', message: 'Server has no ELEVENLABS_API_KEY for live captions.' })
+      return
+    }
+
+    flushing = true
+    const merged = Buffer.concat(pcmChunks, pcmBytes)
+    pcmChunks = []
+    pcmBytes = 0
+
+    try {
+      const wav = pcm16ToWavBuffer(merged, 16000)
+      const formData = new FormData()
+      formData.append('file', wav, { filename: 'partial.wav', contentType: 'audio/wav' })
+      formData.append('model_id', 'scribe_v2')
+
+      const response = await axios.post('https://api.elevenlabs.io/v1/speech-to-text', formData, {
+        headers: { 'xi-api-key': ELEVENLABS_API_KEY, ...formData.getHeaders() },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+        timeout: 30000,
+      })
+
+      const text = (response.data?.text || response.data?.transcript || '').trim()
+      if (text) {
+        safeSendCaption({ type: 'partial_transcript', text })
+      }
+    } catch (error) {
+      log('[STT-Stream] Scribe partial failed:', error.response?.data || error.message)
+    } finally {
+      flushing = false
+    }
+  }
+
+  function scheduleFlush() {
+    if (flushTimer) return
+    flushTimer = setTimeout(() => {
+      flushTimer = null
+      void flush()
+    }, FLUSH_MS)
+  }
+
+  browserWs.on('message', (rawMessage) => {
+    log('[Proxy] Browser message received')
+    let message
+    try {
+      message = JSON.parse(rawMessage.toString())
+    } catch {
+      return
+    }
+
+    if (message.type === 'audio_chunk' && typeof message.audio === 'string') {
+      const buf = Buffer.from(message.audio, 'base64')
+      pcmChunks.push(buf)
+      pcmBytes += buf.length
+      if (pcmBytes >= FLUSH_BYTES) {
+        if (flushTimer) {
+          clearTimeout(flushTimer)
+          flushTimer = null
+        }
+        void flush()
+      } else {
+        scheduleFlush()
+      }
+    } else if (message.type === 'flush') {
+      if (flushTimer) {
+        clearTimeout(flushTimer)
+        flushTimer = null
+      }
+      void flush()
+    }
+  })
+
+  browserWs.on('close', () => {
+    closed = true
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    pcmChunks = []
+    pcmBytes = 0
+  })
+
+  browserWs.on('error', (error) => {
+    log('[STT-Stream] Browser WS error:', error.message)
+  })
+
+  safeSendCaption({ type: 'ready' })
+})
 
 liveWss.on('connection', (browserWs) => {
+  log('[Proxy] Browser connected to /api/live')
   let geminiWs = null
   let elevenWs = null
   let elevenReady = false
@@ -970,6 +1541,7 @@ liveWss.on('connection', (browserWs) => {
   }
 
   function connectGemini() {
+    log('[Gemini] Preparing upstream live connection')
     if (!GEMINI_API_KEY?.trim()) {
       safeSend(browserWs, {
         type: 'error',
@@ -983,6 +1555,7 @@ liveWss.on('connection', (browserWs) => {
     }
 
     geminiWs = new WebSocket(GEMINI_LIVE_WS_URL)
+    log('[Gemini] Opening upstream socket')
 
     const setup = {
       setup: {
@@ -995,6 +1568,9 @@ liveWss.on('connection', (browserWs) => {
         },
         inputAudioTranscription: {},
         outputAudioTranscription: {},
+        historyConfig: {
+          initialHistoryInClientContent: true,
+        },
       },
     }
 
@@ -1097,6 +1673,7 @@ liveWss.on('connection', (browserWs) => {
 
     switch (message.type) {
       case 'start_session':
+        log('[Proxy] start_session received')
         sessionSystemInstruction = typeof message.systemInstruction === 'string' ? message.systemInstruction : ''
         pendingSeedTurns = Array.isArray(message.seedTurns) ? message.seedTurns : []
         connectGemini()
@@ -1150,8 +1727,8 @@ liveWss.on('connection', (browserWs) => {
     }
   })
 
-  browserWs.on('close', () => {
-    log('[Proxy] Browser disconnected — cleaning up')
+  browserWs.on('close', (code, reason) => {
+    log(`[Proxy] Browser disconnected — cleaning up (${code} ${decodeReason(reason)})`)
     stopElevenLabs()
     if (geminiWs && geminiWs.readyState === WebSocket.OPEN) {
       geminiWs.close(1000, 'Browser disconnected')
@@ -1178,6 +1755,7 @@ app.get('*', (_req, res) => {
   res.status(404).json({ message: 'Build output not found.' })
 })
 
-server.listen(PORT, () => {
-  console.log(`Ed-Assist proxy running on http://localhost:${PORT}`)
+void startServerWithPortRecovery(server, PORT).catch((error) => {
+  console.error('[Proxy] Failed to start server:', error)
+  process.exit(1)
 })

@@ -1,7 +1,9 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import { useAudioRecorder } from '../../hooks/useAudioRecorder'
+import useElevenLabsStreamingStt from '../../hooks/useElevenLabsStreamingStt'
 import { formatTime } from '../../utils/audioUtils'
+import { apiRequestUrl, getApiErrorMessage } from '../../utils/apiClient'
 import StatusDot from '../shared/StatusDot'
 
 const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
@@ -13,6 +15,8 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
     onLectureProcessed,
     onNewLecture,
     processingError,
+    processingNotice,
+    runtimeStatus,
     lectureMemoryCount,
     annotationCount,
     hideIdlePlaceholder,
@@ -29,6 +33,22 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
   const [expanded, setExpanded] = useState(false)
   const [error, setError] = useState('')
   const [progress, setProgress] = useState(0)
+  const [liveStream, setLiveStream] = useState(null)
+
+  const liveCaptionsActive = viewState === 'recording' && !recorder.isPaused
+  const captions = useElevenLabsStreamingStt({
+    active: liveCaptionsActive,
+    mediaStream: liveStream,
+    paused: recorder.isPaused,
+  })
+
+  useEffect(() => {
+    if (recorder.isRecording) {
+      setLiveStream(recorder.streamRef?.current || null)
+    } else {
+      setLiveStream(null)
+    }
+  }, [recorder.isRecording, recorder.streamRef])
 
   const endLecture = useCallback(async () => {
     const durationMs = Math.max(recorder.elapsed * 1000, performance.now() - recordingStartedAtRef.current)
@@ -45,19 +65,27 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
       const ext = blob.type?.includes('mp4') ? 'm4a' : 'webm'
       formData.append('audio', blob, `lecture.${ext}`)
       formData.append('durationMs', String(Math.round(durationMs)))
-      const response = await axios.post('/api/transcribe', formData)
+      const response = await axios.post(apiRequestUrl('/api/transcribe'), formData)
       const nextTranscript = response.data?.transcript || ''
       const nextSegments = Array.isArray(response.data?.segments) ? response.data.segments : []
       onTranscriptChange?.(nextTranscript)
       setProgress(100)
-      await onLectureProcessed?.({
+      const publishResult = await onLectureProcessed?.({
         transcript: nextTranscript,
         transcriptSegments: nextSegments,
         durationMs: Math.round(durationMs),
       })
+      if (publishResult?.ok === false && publishResult.message) {
+        setError(publishResult.message)
+      }
       setViewState('done')
     } catch (requestError) {
-      setError(requestError.response?.data?.message || 'Transcription failed.')
+      setError(
+        getApiErrorMessage(requestError, {
+          action: 'transcribe the lecture audio',
+          fallback: 'Transcription failed.',
+        }),
+      )
       setViewState('idle')
     }
   }, [onLectureProcessed, onTranscriptChange, recorder])
@@ -167,6 +195,42 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
 
       {(viewState === 'recording' || recorder.isPaused) && (
         <div className="animate-fade-in" style={{ display: 'grid', gap: 14 }}>
+          <div
+            aria-live="polite"
+            style={{
+              padding: '10px 14px',
+              borderRadius: 12,
+              border: '1px solid var(--border)',
+              background: 'rgba(108,99,255,0.06)',
+              minHeight: 56,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              fontSize: 13,
+              lineHeight: 1.5,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: '0.12em',
+                textTransform: 'uppercase',
+                color: 'var(--text-muted)',
+              }}
+            >
+              Live caption (ElevenLabs Scribe)
+            </div>
+            <div style={{ color: captions.partialText ? 'var(--text-primary)' : 'var(--text-muted)' }}>
+              {captions.error
+                ? captions.error
+                : captions.partialText
+                  ? captions.partialText
+                  : recorder.isPaused
+                    ? 'Captions paused.'
+                    : 'Listening…'}
+            </div>
+          </div>
           <canvas
             ref={canvasRef}
             width={800}
@@ -249,13 +313,31 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
               </h3>
               <p style={{ margin: '6px 0 0', color: 'var(--text-secondary)', fontSize: 13, maxWidth: 420 }}>
                 {lectureStatus === 'published'
-                  ? `${lectureMemoryCount} memory ${lectureMemoryCount === 1 ? 'entry' : 'entries'} · ${annotationCount} annotations`
+                  ? runtimeStatus?.lectureMemoryMode === 'pending'
+                    ? `Students can open the annotated PDF now. Gemma 4 is building lecture memory from ${annotationCount} annotations.`
+                    : runtimeStatus?.lectureMemoryMode === 'error'
+                      ? `The lecture package is live for students, but Gemma 4 memory is unavailable right now.`
+                      : `${lectureMemoryCount} memory ${lectureMemoryCount === 1 ? 'entry' : 'entries'} · ${annotationCount} annotations`
                   : 'Review the transcript below.'}
               </p>
             </div>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, color: 'var(--text-muted)' }}>
-              <StatusDot color={lectureStatus === 'published' ? 'var(--secondary)' : 'var(--amber)'} />
-              {lectureStatus === 'published' ? 'Live for students' : lectureStatus}
+              <StatusDot
+                color={
+                  lectureStatus === 'published'
+                    ? runtimeStatus?.lectureMemoryMode === 'error'
+                      ? 'var(--amber)'
+                      : 'var(--secondary)'
+                    : 'var(--amber)'
+                }
+              />
+              {lectureStatus === 'published'
+                ? runtimeStatus?.lectureMemoryMode === 'pending'
+                  ? 'Live for students · Building Gemma 4 memory'
+                  : runtimeStatus?.lectureMemoryMode === 'error'
+                    ? 'Live for students · Gemma 4 unavailable'
+                    : 'Live for students'
+                : lectureStatus}
             </div>
           </div>
 
@@ -291,6 +373,7 @@ const ProfessorLectureControls = forwardRef(function ProfessorLectureControls(
           </button>
 
           {(error || processingError) && <p style={{ margin: 0, color: 'var(--danger)', fontSize: 13 }}>{error || processingError}</p>}
+          {!!processingNotice && <p style={{ margin: 0, color: 'var(--amber)', fontSize: 13 }}>{processingNotice}</p>}
         </div>
       )}
     </div>
