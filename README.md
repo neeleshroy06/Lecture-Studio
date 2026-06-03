@@ -204,7 +204,3 @@ Browser WebSocket handshakes may send an empty **Referer**, so Google API keys r
 ```
 
 ---
-
-## License
-
-Use and modify according to your repository’s license (add a `LICENSE` file if you distribute this project).
